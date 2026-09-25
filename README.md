@@ -1,6 +1,6 @@
-<div align="center">
-
 # LightLang
+
+<div align="center">
 
 **让中文编程更自然，让 Rust 能力触手可及。**
 
@@ -356,6 +356,12 @@ light-lang/
 ├── Cargo.toml               Rust workspace
 └── lightGo.toml             Light 项目清单示例
 ```
+
+### 核心组件
+
+- **lightc** - 编译器，包含词法分析、语法解析、类型推导和 LLVM 代码生成
+- **lightrt** - Rust 运行时，提供字符串、数组、字典等核心数据类型及数学、文件、系统函数
+- **lightgo** - 项目构建工具，支持项目管理、依赖构建和 Cargo 风格选项
 
 ## 当前限制
 
