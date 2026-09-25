@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["lightc", "lightgo", "lightrt"]
+
+[profile.release]
+opt-level = 3
+lto = true

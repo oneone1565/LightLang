@@ -1,0 +1,10 @@
+/target/
+**/target/
+.lightGo/
+*.ll
+*.o
+*.s
+*.a
+*.tar.gz
+*.log
+core

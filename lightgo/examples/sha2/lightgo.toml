@@ -1,0 +1,8 @@
+[package]
+name = "sha2_demo"
+version = "0.1.0"
+entry = "src/main.light"
+
+[[ffi]]
+name = "sha2"
+manifest = "ffi/Cargo.toml"

@@ -1,0 +1,13 @@
+[package]
+name = "light_gui_ffi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+eframe = "0.36.2"
+lightrt = { path = "../../../../lightrt" }
+
+[workspace]

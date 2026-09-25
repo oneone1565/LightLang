@@ -1,0 +1,3 @@
+导入 "gui"
+外部 light_gui_show()
+light_gui_show()

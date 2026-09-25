@@ -1,0 +1,70 @@
+# 埃拉托斯特尼筛法：用数组标记素数
+函数 sieve(n):
+    让 mark = 数组(n + 1)
+    让 i = 2
+    当 i * i <= n:
+        如果 mark[i] == 0:
+            让 j = i * i
+            当 j <= n:
+                mark[j] = 1
+                j = j + i
+        i = i + 1
+    返回 mark
+
+# 统计素数个数
+函数 count_primes(mark, n):
+    让 count = 0
+    让 i = 2
+    当 i <= n:
+        如果 mark[i] == 0:
+            count = count + 1
+        i = i + 1
+    返回 count
+
+# 求所有素数之和
+函数 sum_primes(mark, n):
+    让 s = 0
+    让 i = 2
+    当 i <= n:
+        如果 mark[i] == 0:
+            s = s + i
+        i = i + 1
+    返回 s
+
+# 递归求数组中第 n 个素数
+函数 nth_prime(mark, n, current, found):
+    如果 current > 100:
+        返回 -1
+    如果 mark[current] == 0:
+        如果 found == n - 1:
+            返回 current
+        返回 nth_prime(mark, n, current + 1, found + 1)
+    返回 nth_prime(mark, n, current + 1, found)
+
+# 字符串重复拼接（测试循环中的字符串 RAII）
+函数 repeat(s, n):
+    让 结果 = ""
+    让 i = 0
+    当 i < n:
+        结果 = 结果 + s
+        i = i + 1
+    返回 结果
+
+函数 main():
+    让 limit = 30
+    让 mark = sieve(limit)
+
+    打印 count_primes(mark, limit)
+    打印 sum_primes(mark, limit)
+    打印 nth_prime(mark, 5, 2, 0)
+
+    # 打印前 10 个素数
+    让 i = 2
+    当 i <= limit:
+        如果 mark[i] == 0:
+            打印 i
+        i = i + 1
+
+    打印 repeat("哈", 3)
+
+    返回 0

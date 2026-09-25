@@ -1,0 +1,13 @@
+[package]
+name = "sha2_ffi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+sha2 = "0.11.0"
+lightrt = { path = "../../../../lightrt" }
+
+[workspace]

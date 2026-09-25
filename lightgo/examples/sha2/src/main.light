@@ -1,0 +1,4 @@
+导入 "sha2"
+外部 light_sha256_prefix32(s)
+s = "abc"
+打印 light_sha256_prefix32(s)

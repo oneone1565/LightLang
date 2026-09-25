@@ -1,0 +1,19 @@
+外部 lightrt_live_arrays()
+外部 lightrt_live_strings()
+
+函数 main():
+    # 所有堆资源都在这个内层作用域里
+    如果 真:
+        让 a = 数组(100)
+        a[0] = 1
+        a[99] = 99
+        让 s = "你好" + "世界"
+        让 b = 数组(50)
+        打印 "作用域内使用完毕"
+    # 退出内层作用域，a/s/b 应全部自动释放
+
+    # 此时不应有任何存活的堆对象
+    打印 lightrt_live_arrays()
+    打印 lightrt_live_strings()
+
+    返回 0
