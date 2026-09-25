@@ -34,6 +34,7 @@ LightLang 想解决两个很实际的问题：
 ![平台](https://img.shields.io/badge/platform-Linux%20x86_64-lightgrey)
 ![许可证](https://img.shields.io/badge/license-GPL--3.0-green)
 ![阶段](https://img.shields.io/badge/status-early%20development-orange)
+![欢迎](https://img.shields.io/badge/star%20%7C%20welcome!-ff6b35?style=for-the-badge)
 ![工具](https://img.shields.io/badge/tool-lightGo-purple)
 
 ## 核心特点
