@@ -336,7 +336,8 @@ fn is_builtin(name: &str) -> bool {
         | "查找" | "包含" | "替换" | "分割" | "合并" | "大写" | "小写" | "去空白" | "切片"
         | "读取文件" | "写入文件" | "追加文件" | "文件存在"
         | "执行" | "环境变量" | "退出" | "字符"
-        | "反转" | "索引" | "排序" | "连接" | "数组")
+        | "反转" | "索引" | "排序" | "连接" | "数组"
+        | "路由" | "启动" | "请求方法" | "请求路径" | "请求体" | "请求头")
 }
 
 /// 内置函数对字符串/数组参数的隐含类型要求
@@ -466,6 +467,8 @@ pub fn expr_type(expr: &Expr, locals: &HashMap<String, Ty>, env: &TypeEnv, fname
                 "排序" => return Ty::None,
                 "退出" => return Ty::None,
                 "字符" => return Ty::Str,
+                "路由" | "启动" => return Ty::Int,
+                "请求方法" | "请求路径" | "请求体" | "请求头" => return Ty::Str,
                 _ => {}
             }
             if let Some(t) = env.return_types.get(name) {

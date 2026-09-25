@@ -89,6 +89,12 @@ const RUNTIME_DECLS: &[&str] = &[
     "declare void @light_print_dict(ptr)",
     "declare void @light_throw(ptr)",
     "declare ptr @light_take_error()",
+    "declare i64 @light_web_register_v1(i32, ptr, i64, ptr)",
+    "declare i64 @light_web_run_v1(i64)",
+    "declare i64 @light_web_request_method_v1(i64)",
+    "declare i64 @light_web_request_path_v1(i64)",
+    "declare i64 @light_web_request_body_v1(i64)",
+    "declare i64 @light_web_request_header_v1(i64, ptr, i64)",
     "declare ptr @light_array_new(i64)",
     "declare i64 @light_array_get(ptr, i64)",
     "declare void @light_array_set(ptr, i64, i64)",
@@ -1263,10 +1269,118 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         Ok((r2, Ty::Bool))
     }
 
+    fn gen_string_parts(&mut self, expr: &Expr, scopes: &mut Vec<Scope>) -> Result<(String, String, String), String> {
+        let (reg, ty) = self.gen_expr(expr, scopes)?;
+        if ty != Ty::Str {
+            return Err("LightWeb 路由参数必须是字符串".into());
+        }
+        let p = self.i64_to_ptr(&reg);
+        let data = self.fresh();
+        self.emit(&format!("  {} = call ptr @light_str_ptr(ptr {})", data, p));
+        let len = self.fresh();
+        self.emit(&format!("  {} = call i64 @light_str_len(ptr {})", len, p));
+        Ok((reg, data, len))
+    }
+
+    fn gen_web_route(&mut self, args: &[Expr], scopes: &mut Vec<Scope>) -> Result<(String, Ty), String> {
+        if args.len() != 3 {
+            return Err("路由 需要方法、路径和处理器".into());
+        }
+        let method = match &args[0] {
+            Expr::Str(method) => method.as_str(),
+            _ => return Err("路由方法必须是字符串".into()),
+        };
+        let method_code = match method {
+            "GET" => 0,
+            "POST" => 1,
+            _ => return Err("LightWeb 目前只支持 GET 和 POST".into()),
+        };
+        let handler = match &args[2] {
+            Expr::Ident(name) => name,
+            _ => return Err("路由处理器必须是函数名".into()),
+        };
+        let Some(handler_ty) = self.env.return_types.get(handler) else {
+            return Err(format!("未找到路由处理器：{}", handler));
+        };
+        if Ty::from(handler_ty.clone()) != Ty::Str {
+            return Err("LightWeb 处理器必须返回字符串".into());
+        }
+        let (method_reg, _, _) = self.gen_string_parts(&args[0], scopes)?;
+        let (path_reg, path_data, path_len) = self.gen_string_parts(&args[1], scopes)?;
+        let status = self.fresh();
+        self.emit(&format!(
+            "  {} = call i64 @light_web_register_v1(i32 {}, ptr {}, i64 {}, ptr @{})",
+            status,
+            method_code,
+            path_data,
+            path_len,
+            Self::mangle(handler)
+        ));
+        self.free_value(&method_reg, &Ty::Str);
+        self.free_value(&path_reg, &Ty::Str);
+        Ok((status, Ty::Int))
+    }
+
+    fn gen_web_run(&mut self, args: &[Expr], scopes: &mut Vec<Scope>) -> Result<(String, Ty), String> {
+        if args.len() != 1 {
+            return Err("启动 需要一个端口参数".into());
+        }
+        let (port, ty) = self.gen_expr(&args[0], scopes)?;
+        if ty != Ty::Int {
+            return Err("启动端口必须是整数".into());
+        }
+        let result = self.fresh();
+        self.emit(&format!("  {} = call i64 @light_web_run_v1(i64 {})", result, port));
+        Ok((result, Ty::Int))
+    }
+
+    fn gen_web_request(&mut self, name: &str, args: &[Expr], scopes: &mut Vec<Scope>) -> Result<(String, Ty), String> {
+        if args.is_empty() {
+            return Err(format!("{} 需要请求参数", name));
+        }
+        let (request, _) = self.gen_expr(&args[0], scopes)?;
+        if name == "请求头" {
+            if args.len() != 2 {
+                return Err("请求头 需要请求和名称".into());
+            }
+            let (name_reg, name_data, name_len) = self.gen_string_parts(&args[1], scopes)?;
+            let result = self.fresh();
+            self.emit(&format!(
+                "  {} = call i64 @light_web_request_header_v1(i64 {}, ptr {}, i64 {})",
+                result, request, name_data, name_len
+            ));
+            if !matches!(args[1], Expr::Ident(_)) {
+                self.free_value(&name_reg, &Ty::Str);
+            }
+            Ok((result, Ty::Str))
+        } else {
+            if args.len() != 1 {
+                return Err(format!("{} 只需要请求参数", name));
+            }
+            let function = match name {
+                "请求方法" => "light_web_request_method_v1",
+                "请求路径" => "light_web_request_path_v1",
+                "请求体" => "light_web_request_body_v1",
+                _ => return Err(format!("未知 LightWeb 请求函数：{}", name)),
+            };
+            let result = self.fresh();
+            self.emit(&format!("  {} = call i64 @{}(i64 {})", result, function, request));
+            Ok((result, Ty::Str))
+        }
+    }
+
     /// 函数调用与内置函数
     fn gen_call(&mut self, name: &str, args: &[Expr],
                 scopes: &mut Vec<Scope>) -> Result<(String, Ty), String> {
         let name = name.rsplit('.').next().unwrap_or(name);
+        match name {
+            "路由" => return self.gen_web_route(args, scopes),
+            "启动" => return self.gen_web_run(args, scopes),
+            "请求方法" | "请求路径" | "请求体" | "请求头" => {
+                return self.gen_web_request(name, args, scopes);
+            }
+            _ => {}
+        }
         // 用户自定义函数或外部声明优先于内置函数
         let is_user_fn = self.env.return_types.contains_key(name)
             || self.externs.contains(name);

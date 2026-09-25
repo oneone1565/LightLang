@@ -1,0 +1,12 @@
+[package]
+name = "lightweb"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "lightweb"
+crate-type = ["staticlib"]
+
+[dependencies]
+tiny_http = "0.12.0"
+lightrt = { path = "../lightrt" }

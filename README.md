@@ -310,6 +310,32 @@ lightGo 运行 --manifest-path lightgo/examples/gui/lightGo.toml
 
 GUI 模块会自动寻找系统中的 CJK 字体，优先支持 Droid Sans Fallback 和 Noto CJK，避免中文显示为方框。
 
+## lightWeb：轻量 Web 框架
+
+`lightWeb` 让 Light 程序可以直接注册路由并启动一个本地 HTTP 服务。处理器使用中文语言编写，路由、请求方法和请求体也都有对应的中文函数。
+
+```light
+导入 "lightWeb"
+
+函数 首页(请求):
+    返回 "你好，lightWeb！"
+
+函数 回声(请求):
+    返回 请求路径(请求) + " | " + 请求方法(请求) + " | " + 请求体(请求)
+
+路由("GET", "/", 首页)
+路由("POST", "/echo", 回声)
+启动(8080)
+```
+
+运行：
+
+```bash
+lightGo 运行 --manifest-path lightgo/examples/web/lightGo.toml
+```
+
+第一版使用同步 HTTP 服务器，支持精确路径、GET、POST 和文本响应。后续可以继续加入模板、静态文件、路径参数和结构化响应。
+
 ## 示例目录
 
 仓库中提供了一组可以逐个运行的示例：
@@ -324,6 +350,7 @@ GUI 模块会自动寻找系统中的 CJK 字体，优先支持 Droid Sans Fallb
 - Rust FFI
 - `sha2` Cargo 依赖
 - `eframe` GUI
+- `lightWeb` GET/POST 路由
 
 示例文件主要位于：
 
@@ -352,6 +379,7 @@ light-lang/
 ├── lightc/                  Light 编译器
 ├── lightrt/                 Rust 运行时
 ├── lightgo/                 项目工具与示例
+├── lightweb/                HTTP 服务器运行时
 ├── examples/                Light 示例
 ├── install.sh               发行版安装脚本
 ├── Cargo.toml               Rust workspace
@@ -363,6 +391,7 @@ light-lang/
 - **lightc** - 编译器，包含词法分析、语法解析、类型推导和 LLVM 代码生成
 - **lightrt** - Rust 运行时，提供字符串、数组、字典等核心数据类型及数学、文件、系统函数
 - **lightgo** - 项目构建工具，支持项目管理、依赖构建和 Cargo 风格选项
+- **lightweb** - 基于 Rust `tiny_http` 的轻量 HTTP 服务器运行时
 
 ## 当前限制
 
@@ -374,7 +403,8 @@ LightLang 目前仍处于早期开发阶段，以下能力正在逐步完善：
 - 更强的编译错误和类型错误提示
 - 跨平台构建与安装流程
 - 更完整的包管理、依赖缓存和发布流程
-- Web 支持和 Light 配置格式
+- 更完整的 Web 路由、模板和静态文件支持
+- 基于 Light 的简单配置文件格式
 
 目前发行包主要面向 Linux x86_64，其他平台需要根据系统工具链单独构建。
 

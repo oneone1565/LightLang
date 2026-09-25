@@ -1,0 +1,8 @@
+[package]
+name = "hello_web"
+version = "0.1.0"
+entry = "src/main.light"
+
+[[ffi]]
+name = "lightWeb"
+manifest = "../../../lightweb/Cargo.toml"
