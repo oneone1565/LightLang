@@ -190,6 +190,7 @@ fn collect_locals_stmt(stmt: &Stmt, locals: &mut HashMap<String, Ty>, env: &Type
                 locals.insert(name.clone(), ty);
             }
         }
+        Stmt::Thread { body, .. } | Stmt::Page { body, .. } => collect_locals(body, locals, env, fname),
         Stmt::If { then, elifs, els, .. } => {
             collect_locals(then, locals, env, fname);
             for (_, b) in elifs {
@@ -214,6 +215,11 @@ fn analyze_stmt(stmt: &Stmt, fname: &str, locals: &HashMap<String, Ty>,
             analyze_expr(value, fname, locals, env, cons);
         }
         Stmt::Expr(e) | Stmt::Print(e) => analyze_expr(e, fname, locals, env, cons),
+        Stmt::Thread { body, .. } | Stmt::Page { body, .. } => {
+            for s in &body.stmts {
+                analyze_stmt(s, fname, locals, env, cons);
+            }
+        }
         Stmt::If { cond, then, elifs, els, .. } => {
             analyze_expr(cond, fname, locals, env, cons);
             for s in &then.stmts { analyze_stmt(s, fname, locals, env, cons); }
@@ -337,7 +343,8 @@ fn is_builtin(name: &str) -> bool {
         | "读取文件" | "写入文件" | "追加文件" | "文件存在"
         | "执行" | "环境变量" | "退出" | "字符"
         | "反转" | "索引" | "排序" | "连接" | "数组"
-        | "路由" | "启动" | "请求方法" | "请求路径" | "请求体" | "请求头")
+        | "路由" | "启动" | "请求方法" | "请求路径" | "请求体" | "请求头"
+        | "等待全部")
 }
 
 /// 内置函数对字符串/数组参数的隐含类型要求

@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::os::raw::c_void;
 use std::ptr;
 use std::sync::{Mutex, OnceLock};
@@ -22,6 +23,7 @@ struct Route {
     method: RouteMethod,
     path: String,
     handler: LightHandler,
+    html: bool,
 }
 
 struct WebRequest {
@@ -29,6 +31,49 @@ struct WebRequest {
     path: String,
     body: Vec<u8>,
     headers: Vec<(String, String)>,
+}
+
+struct PageState {
+    title: String,
+    icon: String,
+    lang: String,
+    theme: String,
+    content: Vec<u8>,
+}
+
+thread_local! {
+    static PAGE: RefCell<PageState> = RefCell::new(PageState {
+        title: String::new(),
+        icon: String::new(),
+        lang: String::from("zh-cn"),
+        theme: String::from("light"),
+        content: Vec::new(),
+    });
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn string_from_ptr(ptr: *const u8, len: i64) -> String {
+    if ptr.is_null() || len < 0 {
+        return String::new();
+    }
+    String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(ptr, len as usize) }).to_string()
+}
+
+fn page_append_str(value: &str) {
+    PAGE.with(|page| page.borrow_mut().content.extend_from_slice(value.as_bytes()));
+}
+
+fn page_append_value(value: impl std::fmt::Display) {
+    let text = value.to_string();
+    PAGE.with(|page| page.borrow_mut().content.extend_from_slice(text.as_bytes()));
 }
 
 fn routes() -> &'static Mutex<Vec<Route>> {
@@ -51,12 +96,12 @@ unsafe fn light_string_bytes<'a>(value: i64) -> Option<&'a [u8]> {
     ))
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn light_web_register_v1(
+unsafe fn register_route(
     method: i32,
     path_ptr: *const u8,
     path_len: i64,
     handler: LightHandler,
+    html: bool,
 ) -> i64 {
     if path_ptr.is_null() || path_len < 0 {
         return -1;
@@ -83,8 +128,106 @@ pub unsafe extern "C" fn light_web_register_v1(
     {
         return -2;
     }
-    list.push(Route { method, path, handler });
+    list.push(Route { method, path, handler, html });
     0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn light_web_register_v1(
+    method: i32,
+    path_ptr: *const u8,
+    path_len: i64,
+    handler: LightHandler,
+) -> i64 {
+    register_route(method, path_ptr, path_len, handler, false)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn light_web_register_html_v1(
+    method: i32,
+    path_ptr: *const u8,
+    path_len: i64,
+    handler: LightHandler,
+) -> i64 {
+    register_route(method, path_ptr, path_len, handler, true)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn light_page_reset(
+    title_ptr: *const u8,
+    title_len: i64,
+    icon_ptr: *const u8,
+    icon_len: i64,
+) {
+    let title = string_from_ptr(title_ptr, title_len);
+    let icon = string_from_ptr(icon_ptr, icon_len);
+    PAGE.with(|page| {
+        *page.borrow_mut() = PageState {
+            title,
+            icon,
+            lang: String::from("zh-cn"),
+            theme: String::from("light"),
+            content: Vec::new(),
+        };
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn light_page_set_lang(ptr: *const u8, len: i64) {
+    let value = string_from_ptr(ptr, len);
+    PAGE.with(|page| page.borrow_mut().lang = value);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn light_page_set_theme(ptr: *const u8, len: i64) {
+    let value = string_from_ptr(ptr, len);
+    PAGE.with(|page| page.borrow_mut().theme = value);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn light_page_append_str(ptr: *const u8, len: i64) {
+    page_append_str(&string_from_ptr(ptr, len));
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn light_page_append_int(value: i64) {
+    page_append_value(value);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn light_page_append_float(value: f64) {
+    page_append_value(value);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn light_page_append_bool(value: i64) {
+    page_append_value(value != 0);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn light_page_finish() -> *mut c_void {
+    PAGE.with(|page| {
+        let mut page = page.borrow_mut();
+        let title = html_escape(&page.title);
+        let lang = html_escape(&page.lang);
+        let icon = html_escape(&page.icon);
+        let content = String::from_utf8_lossy(&page.content).to_string();
+        let (background, foreground) = if page.theme == "dark" {
+            ("#101418", "#e6edf3")
+        } else {
+            ("#ffffff", "#111827")
+        };
+        let icon_link = if page.icon.is_empty() || page.icon == "none" {
+            String::new()
+        } else {
+            format!("<link rel=\"icon\" href=\"{}\">\n", icon)
+        };
+        let html = format!(
+            "<!doctype html>\n<html lang=\"{lang}\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>{title}</title>\n{icon_link}<style>\nbody {{ margin: 0; padding: 2rem; background: {background}; color: {foreground}; font-family: system-ui, sans-serif; }}\n</style>\n</head>\n<body>\n{content}\n</body>\n</html>\n"
+        );
+        page.content.clear();
+        make_string(html.as_bytes()) as *mut c_void
+    })
 }
 
 #[no_mangle]
@@ -169,10 +312,10 @@ fn handle_request(mut request: Request) {
                 };
                 route_method == method && route.path == path
             })
-            .map(|route| route.handler)
+            .map(|route| (route.handler, route.html))
     };
-    let handler = match route {
-        Some(handler) => handler,
+    let (handler, html_response) = match route {
+        Some(route) => route,
         None => {
             let allowed = {
                 let list = routes().lock().ok();
@@ -209,10 +352,12 @@ fn handle_request(mut request: Request) {
         }
     };
     unsafe { light_str_free(response_value as *mut c_void) };
-    let content_type = Header::from_bytes(
-        &b"Content-Type"[..],
-        &b"text/plain; charset=utf-8"[..],
-    );
+    let content_type_value: &[u8] = if html_response {
+        b"text/html; charset=utf-8"
+    } else {
+        b"text/plain; charset=utf-8"
+    };
+    let content_type = Header::from_bytes(&b"Content-Type"[..], content_type_value);
     let response = Response::from_string(response_text).with_status_code(200);
     let response = match content_type {
         Ok(header) => response.with_header(header),
@@ -223,6 +368,14 @@ fn handle_request(mut request: Request) {
 
 #[no_mangle]
 pub unsafe extern "C" fn light_web_run_v1(port: i64) -> i64 {
+    let port = if port == 0 {
+        std::env::var("LIGHT_WEB_PORT")
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(8080)
+    } else {
+        port
+    };
     if !(1..=65535).contains(&port) {
         return -1;
     }

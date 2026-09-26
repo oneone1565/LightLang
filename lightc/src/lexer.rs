@@ -11,6 +11,8 @@ pub enum TokenKind {
     Let,      // 让
     Print,    // 打印
     Throw,    // 抛出
+    Thread,   // 线程
+    Page,     // 页面
     Try,      // 尝试
     Catch,    // 捕获
     Finally,  // 最终
@@ -85,6 +87,8 @@ impl fmt::Display for TokenKind {
             TokenKind::Let => write!(f, "让"),
             TokenKind::Print => write!(f, "打印"),
             TokenKind::Throw => write!(f, "抛出"),
+            TokenKind::Thread => write!(f, "线程"),
+            TokenKind::Page => write!(f, "页面"),
             TokenKind::Try => write!(f, "尝试"),
             TokenKind::Catch => write!(f, "捕获"),
             TokenKind::Finally => write!(f, "最终"),
@@ -228,6 +232,8 @@ impl Lexer {
             "让" => Some(TokenKind::Let),
             "打印" => Some(TokenKind::Print),
             "抛出" => Some(TokenKind::Throw),
+            "线程" => Some(TokenKind::Thread),
+            "页面" => Some(TokenKind::Page),
             "尝试" => Some(TokenKind::Try),
             "捕获" => Some(TokenKind::Catch),
             "最终" => Some(TokenKind::Finally),

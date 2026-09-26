@@ -15,6 +15,7 @@
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::thread::{self, JoinHandle};
 
 // ---------------------------------------------------------------------------
 // 内存追踪：用于检测泄漏（调试期安全网）
@@ -59,6 +60,14 @@ pub struct LightDict {
     keys: Vec<(u8, i64)>,
     vals: Vec<(u8, i64)>,
 }
+
+struct LightThread {
+    handle: Option<JoinHandle<i64>>,
+}
+
+type LightThreadTask = unsafe extern "C" fn(i64) -> i64;
+
+static THREADS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 
 // ---------------------------------------------------------------------------
 // 内部工具：安全失败
@@ -231,6 +240,76 @@ pub extern "C" fn light_take_error() -> *mut LightStr {
         Ok(mut slot) => slot.take().map(make_str).unwrap_or(std::ptr::null_mut()),
         Err(_) => std::ptr::null_mut(),
     }
+}
+
+fn join_thread(address: usize) -> i64 {
+    if address == 0 {
+        return -1;
+    }
+    let task = unsafe { Box::from_raw(address as *mut LightThread) };
+    match task.handle {
+        Some(handle) => match handle.join() {
+            Ok(value) => value,
+            Err(_) => -1,
+        },
+        None => -1,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn light_thread_spawn(task: LightThreadTask, argument: i64) -> *mut std::os::raw::c_void {
+    if task as usize == 0 {
+        return std::ptr::null_mut();
+    }
+    let spawned = thread::Builder::new().spawn(move || {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { task(argument) })) {
+            Ok(value) => value,
+            Err(_) => -1,
+        }
+    });
+    let handle = match spawned {
+        Ok(handle) => handle,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let thread = Box::into_raw(Box::new(LightThread { handle: Some(handle) }));
+    if let Ok(mut threads) = THREADS.lock() {
+        threads.push(thread as usize);
+    }
+    thread as *mut std::os::raw::c_void
+}
+
+#[no_mangle]
+pub extern "C" fn light_thread_join(thread: *mut std::os::raw::c_void) -> i64 {
+    if thread.is_null() {
+        return -1;
+    }
+    let address = thread as usize;
+    let registered = if let Ok(mut threads) = THREADS.lock() {
+        let before = threads.len();
+        threads.retain(|value| *value != address);
+        threads.len() != before
+    } else {
+        false
+    };
+    if !registered {
+        return -1;
+    }
+    join_thread(address)
+}
+
+#[no_mangle]
+pub extern "C" fn light_thread_join_all() -> i64 {
+    let addresses = match THREADS.lock() {
+        Ok(mut threads) => std::mem::take(&mut *threads),
+        Err(_) => return -1,
+    };
+    let mut failed = 0;
+    for address in addresses {
+        if join_thread(address) < 0 {
+            failed += 1;
+        }
+    }
+    if failed == 0 { 0 } else { -failed }
 }
 
 fn str_content(s: *const LightStr) -> String {

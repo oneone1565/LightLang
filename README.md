@@ -312,29 +312,63 @@ GUI 模块会自动寻找系统中的 CJK 字体，优先支持 Droid Sans Fallb
 
 ## lightWeb：轻量 Web 框架
 
-`lightWeb` 让 Light 程序可以直接注册路由并启动一个本地 HTTP 服务。处理器使用中文语言编写，路由、请求方法和请求体也都有对应的中文函数。
+`lightWeb` 让 Light 程序可以在同一个项目中同时提供后端接口和浏览器页面。页面中的 `打印` 内容会作为 HTML 返回，而不是输出到终端。
 
 ```light
 导入 "lightWeb"
 
-函数 首页(请求):
-    返回 "你好，lightWeb！"
+函数 接口(请求):
+    返回 "后端接口"
 
-函数 回声(请求):
-    返回 请求路径(请求) + " | " + 请求方法(请求) + " | " + 请求体(请求)
+路由("GET", "/api", 接口)
 
-路由("GET", "/", 首页)
-路由("POST", "/echo", 回声)
-启动(8080)
+页面 (标题="hello" 图标=none):
+    语言="zh-cn"
+    主题="dark"
+    打印 "<h1>hello</h1>"
 ```
 
-运行：
+页面会自动注册到 `/`，并生成带有语言、标题、主题和图标信息的 HTML 页面。后端仍然可以使用 `请求方法()`、`请求路径()`、`请求体()` 和 `请求头()`。
+
+运行或停止 Web 服务：
 
 ```bash
-lightGo 运行 --manifest-path lightgo/examples/web/lightGo.toml
+lightGo web start --manifest-path lightgo/examples/page/lightGo.toml --port 8080
+lightGo web stop --manifest-path lightgo/examples/page/lightGo.toml
 ```
 
-第一版使用同步 HTTP 服务器，支持精确路径、GET、POST 和文本响应。后续可以继续加入模板、静态文件、路径参数和结构化响应。
+中文命令同样可用：
+
+```bash
+lightGo 网页 启动
+lightGo 网页 停止
+```
+
+启动后用浏览器打开 `http://127.0.0.1:8080/`。第一版使用同步 HTTP 服务器，支持页面 HTML、精确路径、GET、POST 和文本响应；模板、静态文件和路径参数会继续完善。
+
+## 异步与多线程
+
+LightLang 使用 `线程(编号):` 创建线程代码块。没有 `线程` 代码块时，程序仍然按照普通单线程方式执行。
+
+```light
+打印 "主线程开始"
+
+线程(1):
+    打印 "线程一"
+
+线程(2):
+    打印 "线程二"
+
+打印 "主线程结束"
+```
+
+主线程没有语句时不会产生额外输出，空线程块也会静默结束。程序结束前会自动等待所有线程完成。也可以显式调用：
+
+```light
+等待全部()
+```
+
+当前线程块适合执行相互独立的耗时任务；线程之间共享复杂对象和同步通信仍在后续完善中。
 
 ## 示例目录
 
@@ -351,6 +385,7 @@ lightGo 运行 --manifest-path lightgo/examples/web/lightGo.toml
 - `sha2` Cargo 依赖
 - `eframe` GUI
 - `lightWeb` GET/POST 路由
+- `线程(编号):` 多线程代码块
 
 示例文件主要位于：
 

@@ -38,6 +38,8 @@ pub enum Stmt {
     Expr(Expr),
     Print(Expr),
     Throw(Expr),
+    Thread { id: i64, body: Block },
+    Page { title: String, icon: String, body: Block },
     Try {
         body: Block,
         catch: Option<(String, Block)>,

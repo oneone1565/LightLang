@@ -140,11 +140,13 @@ impl Parser {
                 TokenKind::Ident(_) => {}
                 other => return Err(format!("导入名称必须是标识符，得到 {}", other)),
             }
-            if matches!(self.peek_kind(), TokenKind::Comma) {
-                self.bump();
-            } else {
-                break;
-            }
+                if matches!(self.peek_kind(), TokenKind::Comma) {
+                    self.bump();
+                } else if matches!(self.peek_kind(), TokenKind::Ident(_)) {
+                    continue;
+                } else {
+                    break;
+                }
         }
         self.consume_line_end()?;
         Ok(path)
@@ -191,6 +193,8 @@ impl Parser {
                 self.consume_line_end()?;
                 Ok(Stmt::Throw(value))
             }
+            TokenKind::Thread => self.parse_thread(),
+            TokenKind::Page => self.parse_page(),
             TokenKind::Try => self.parse_try(),
             TokenKind::If => self.parse_if(),
             TokenKind::While => {
@@ -256,6 +260,58 @@ impl Parser {
                 }
             }
         }
+    }
+
+    fn parse_page(&mut self) -> Result<Stmt, String> {
+        self.expect(TokenKind::Page)?;
+        self.expect(TokenKind::LParen)?;
+        let mut title = "LightLang".to_string();
+        let mut icon = "none".to_string();
+        if !matches!(self.peek_kind(), TokenKind::RParen) {
+            loop {
+                let key = match self.bump().kind {
+                    TokenKind::Ident(key) => key,
+                    other => return Err(format!("页面属性名必须是标识符，得到 {}", other)),
+                };
+                self.expect(TokenKind::Assign)?;
+                let value = match self.bump().kind {
+                    TokenKind::Str(value) => value,
+                    TokenKind::Ident(value) => value,
+                    other => return Err(format!("页面属性值必须是字符串或标识符，得到 {}", other)),
+                };
+                match key.as_str() {
+                    "标题" | "title" => title = value,
+                    "图标" | "icon" => icon = value,
+                    other => return Err(format!("未知页面属性：{}", other)),
+                }
+                if matches!(self.peek_kind(), TokenKind::Comma) {
+                    self.bump();
+                } else if matches!(self.peek_kind(), TokenKind::Ident(_)) {
+                    continue;
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(TokenKind::RParen)?;
+        self.expect(TokenKind::Colon)?;
+        self.expect(TokenKind::Newline)?;
+        let body = self.parse_block()?;
+        Ok(Stmt::Page { title, icon, body })
+    }
+
+    fn parse_thread(&mut self) -> Result<Stmt, String> {
+        self.expect(TokenKind::Thread)?;
+        self.expect(TokenKind::LParen)?;
+        let id = match self.bump().kind {
+            TokenKind::Int(id) => id,
+            other => return Err(format!("线程编号必须是整数，得到 {}", other)),
+        };
+        self.expect(TokenKind::RParen)?;
+        self.expect(TokenKind::Colon)?;
+        self.expect(TokenKind::Newline)?;
+        let body = self.parse_block()?;
+        Ok(Stmt::Thread { id, body })
     }
 
     fn parse_try(&mut self) -> Result<Stmt, String> {

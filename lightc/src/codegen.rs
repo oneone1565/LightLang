@@ -74,6 +74,8 @@ pub struct CodeGen<'a> {
     externs: HashSet<String>,
     env: &'a typeinfer::TypeEnv,
     loops: Vec<LoopCtx>,
+    deferred: Vec<String>,
+    page_mode: bool,
     target_triple: String,
 }
 
@@ -90,11 +92,23 @@ const RUNTIME_DECLS: &[&str] = &[
     "declare void @light_throw(ptr)",
     "declare ptr @light_take_error()",
     "declare i64 @light_web_register_v1(i32, ptr, i64, ptr)",
+    "declare i64 @light_web_register_html_v1(i32, ptr, i64, ptr)",
     "declare i64 @light_web_run_v1(i64)",
     "declare i64 @light_web_request_method_v1(i64)",
     "declare i64 @light_web_request_path_v1(i64)",
     "declare i64 @light_web_request_body_v1(i64)",
     "declare i64 @light_web_request_header_v1(i64, ptr, i64)",
+    "declare void @light_page_reset(ptr, i64, ptr, i64)",
+    "declare void @light_page_set_lang(ptr, i64)",
+    "declare void @light_page_set_theme(ptr, i64)",
+    "declare void @light_page_append_str(ptr, i64)",
+    "declare void @light_page_append_int(i64)",
+    "declare void @light_page_append_float(double)",
+    "declare void @light_page_append_bool(i64)",
+    "declare ptr @light_page_finish()",
+    "declare ptr @light_thread_spawn(ptr, i64)",
+    "declare i64 @light_thread_join(ptr)",
+    "declare i64 @light_thread_join_all()",
     "declare ptr @light_array_new(i64)",
     "declare i64 @light_array_get(ptr, i64)",
     "declare void @light_array_set(ptr, i64, i64)",
@@ -175,6 +189,8 @@ impl<'a> CodeGen<'a> {
             externs: HashSet::new(),
             env,
             loops: Vec::new(),
+            deferred: Vec::new(),
+            page_mode: false,
             target_triple,
         }
     }
@@ -441,6 +457,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         let top_stmts: Vec<&Stmt> = program.items.iter()
             .filter_map(|item| if let Item::Stmt(s) = item { Some(s) } else { None })
             .collect();
+        let has_page = top_stmts.iter().any(|stmt| matches!(stmt, Stmt::Page { .. }));
         let has_main = program.items.iter().any(|item| {
             matches!(item, Item::Fn(f) if f.name == "main")
         });
@@ -452,6 +469,10 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             for stmt in &top_stmts {
                 self.gen_stmt(stmt, &mut scopes)?;
             }
+            if has_page {
+                self.emit("  call i64 @light_web_run_v1(i64 0)");
+            }
+            self.emit("  call i64 @light_thread_join_all()");
             let top = scopes.first().unwrap();
             self.cleanup_scope(top);
             self.emit("  ret i64 0");
@@ -461,6 +482,12 @@ fn cleanup_scope(&mut self, scope: &Scope) {
 
         let mut result = String::new();
         result.push_str(&self.out);
+        for function in &self.deferred {
+            result.push_str(function);
+            if !function.ends_with('\n') {
+                result.push('\n');
+            }
+        }
         for g in &self.globals {
             result.push_str(g);
             result.push('\n');
@@ -602,9 +629,116 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         Ok(())
     }
 
+    fn gen_page_print(&mut self, expr: &Expr, scopes: &mut Vec<Scope>) -> Result<(), String> {
+        let (reg, ty) = self.gen_expr(expr, scopes)?;
+        match ty {
+            Ty::Str => {
+                let p = self.i64_to_ptr(&reg);
+                let data = self.fresh();
+                self.emit(&format!("  {} = call ptr @light_str_ptr(ptr {})", data, p));
+                let len = self.fresh();
+                self.emit(&format!("  {} = call i64 @light_str_len(ptr {})", len, p));
+                self.emit(&format!("  call void @light_page_append_str(ptr {}, i64 {})", data, len));
+                if !matches!(expr, Expr::Ident(_)) {
+                    self.emit(&format!("  call void @light_str_free(ptr {})", p));
+                }
+            }
+            Ty::Int => self.emit(&format!("  call void @light_page_append_int(i64 {})", reg)),
+            Ty::Float => self.emit(&format!("  call void @light_page_append_float(double {})", reg)),
+            Ty::Bool => self.emit(&format!("  call void @light_page_append_bool(i64 {})", reg)),
+            _ => return Err("页面中只能打印字符串、数字或布尔值".into()),
+        }
+        Ok(())
+    }
+
+    fn gen_page_setting(&mut self, name: &str, value: &Expr, scopes: &mut Vec<Scope>) -> Result<bool, String> {
+        if !self.page_mode || !matches!(name, "语言" | "主题") {
+            return Ok(false);
+        }
+        let (reg, data, len) = self.gen_string_parts(value, scopes)?;
+        let function = if name == "语言" {
+            "light_page_set_lang"
+        } else {
+            "light_page_set_theme"
+        };
+        self.emit(&format!("  call void @{}(ptr {}, i64 {})", function, data, len));
+        if !matches!(value, Expr::Ident(_)) {
+            self.free_value(&reg, &Ty::Str);
+        }
+        Ok(true)
+    }
+
+    fn gen_page(&mut self, title: &str, icon: &str, body: &Block) -> Result<(), String> {
+        let symbol = self.fresh_label("__light_page");
+        let saved = std::mem::take(&mut self.out);
+        self.emit(&format!("define i64 @{}(i64 %request) {{", symbol));
+        self.emit("entry:");
+        let (title_ptr, title_len) = self.emit_str_const(title);
+        let (icon_ptr, icon_len) = self.emit_str_const(icon);
+        self.emit(&format!(
+            "  call void @light_page_reset(ptr {}, i64 {}, ptr {}, i64 {})",
+            title_ptr, title_len, icon_ptr, icon_len
+        ));
+        let previous_mode = std::mem::replace(&mut self.page_mode, true);
+        self.gen_block(body, &mut vec![Scope { vars: HashMap::new(), owned: Vec::new() }])?;
+        self.page_mode = previous_mode;
+        let ends_with_return = body.stmts.last()
+            .map(|stmt| matches!(stmt, Stmt::Return(_)))
+            .unwrap_or(false);
+        if !ends_with_return {
+            let page = self.fresh();
+            self.emit(&format!("  {} = call ptr @light_page_finish()", page));
+            let result = self.fresh();
+            self.emit(&format!("  {} = ptrtoint ptr {} to i64", result, page));
+            self.emit(&format!("  ret i64 {}", result));
+        }
+        self.emit("}");
+        self.emit("");
+        let wrapper = self.out.clone();
+        self.out = saved;
+        self.deferred.push(wrapper);
+        let (path_ptr, path_len) = self.emit_str_const("/");
+        let status = self.fresh();
+        self.emit(&format!(
+            "  {} = call i64 @light_web_register_html_v1(i32 0, ptr {}, i64 {}, ptr @{})",
+            status, path_ptr, path_len, symbol
+        ));
+        Ok(())
+    }
+
+    fn gen_thread(&mut self, id: i64, body: &Block) -> Result<(), String> {
+        let symbol = self.fresh_label("__light_thread");
+        let saved = std::mem::take(&mut self.out);
+        self.emit(&format!("define i64 @{}(i64 %thread_id) {{", symbol));
+        self.emit("entry:");
+        let scope = Scope { vars: HashMap::new(), owned: Vec::new() };
+        let mut scopes = vec![scope];
+        self.gen_block(body, &mut scopes)?;
+        let ends_with_return = body.stmts.last()
+            .map(|stmt| matches!(stmt, Stmt::Return(_)))
+            .unwrap_or(false);
+        if !ends_with_return {
+            self.emit("  ret i64 0");
+        }
+        self.emit("}");
+        self.emit("");
+        let wrapper = self.out.clone();
+        self.out = saved;
+        self.deferred.push(wrapper);
+        let task = self.fresh();
+        self.emit(&format!(
+            "  {} = call ptr @light_thread_spawn(ptr @{}, i64 {})",
+            task, symbol, id
+        ));
+        Ok(())
+    }
+
     fn gen_stmt(&mut self, stmt: &Stmt, scopes: &mut Vec<Scope>) -> Result<(), String> {
         match stmt {
             Stmt::Let { name, value } => {
+                if self.gen_page_setting(name, value, scopes)? {
+                    return Ok(());
+                }
                 let (val_reg, ty) = self.gen_expr(value, scopes)?;
                 let reg = self.fresh();
                 self.emit(&format!("  {} = alloca i64", reg));
@@ -618,6 +752,9 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             Stmt::Assign { target, value } => {
                 match target {
                     Expr::Ident(name) => {
+                        if self.gen_page_setting(name, value, scopes)? {
+                            return Ok(());
+                        }
                         let old_ty = self.lookup(scopes, name).map(|(_, ty)| ty);
                         let (val_reg, new_ty) = self.gen_expr(value, scopes)?;
                         if let Some(old_ty) = old_ty {
@@ -673,6 +810,9 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             }
             Stmt::Expr(e) => {
                 let _ = self.gen_expr(e, scopes)?;
+            }
+            Stmt::Print(e) if self.page_mode => {
+                self.gen_page_print(e, scopes)?;
             }
             Stmt::Print(e) => {
                 let (reg, ty) = self.gen_expr(e, scopes)?;
@@ -735,6 +875,12 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                         self.emit("  call void @light_print_newline()");
                     }
                 }
+            }
+            Stmt::Thread { id, body } => {
+                self.gen_thread(*id, body)?;
+            }
+            Stmt::Page { title, icon, body } => {
+                self.gen_page(title, icon, body)?;
             }
             Stmt::Throw(expr) => {
                 self.gen_throw_call(expr, scopes)?;
@@ -1378,6 +1524,14 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             "启动" => return self.gen_web_run(args, scopes),
             "请求方法" | "请求路径" | "请求体" | "请求头" => {
                 return self.gen_web_request(name, args, scopes);
+            }
+            "等待全部" => {
+                if !args.is_empty() {
+                    return Err("等待全部 不需要参数".into());
+                }
+                let result = self.fresh();
+                self.emit(&format!("  {} = call i64 @light_thread_join_all()", result));
+                return Ok((result, Ty::Int));
             }
             _ => {}
         }

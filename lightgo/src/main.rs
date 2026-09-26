@@ -3,7 +3,7 @@ use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[derive(Debug, Deserialize)]
 struct Manifest {
@@ -40,6 +40,7 @@ struct BuildOptions {
     manifest_path: Option<PathBuf>,
     profile: String,
     target_dir: Option<PathBuf>,
+    port: Option<i64>,
     cargo_args: Vec<String>,
     quiet: bool,
 }
@@ -58,7 +59,15 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
 
-    let command = match args.remove(0).as_str() {
+    let raw_command = args.remove(0);
+    if raw_command == "web" || raw_command == "网页" {
+        if args.is_empty() {
+            return Err("用法：lightGo web start|stop".into());
+        }
+        let action = args.remove(0);
+        return web_command(&action, &args);
+    }
+    let command = match raw_command.as_str() {
         "build" | "构建" => "build",
         "run" | "运行" => "run",
         "clean" | "清理" => "clean",
@@ -103,11 +112,81 @@ fn run() -> Result<(), String> {
     }
 }
 
+fn web_command(action: &str, args: &[String]) -> Result<(), String> {
+    let options = parse_options(args)?;
+    let manifest_path = options
+        .manifest_path
+        .clone()
+        .map_or_else(find_manifest, Ok)?;
+    let base = manifest_path.parent().unwrap_or(Path::new("."));
+    let state_dir = base.join(".lightGo");
+    let pid_path = state_dir.join("web.pid");
+    match action {
+        "start" | "启动" => {
+            let port = options.port.unwrap_or(8080);
+            if !(1..=65535).contains(&port) {
+                return Err("端口必须在 1 到 65535 之间".into());
+            }
+            if let Ok(value) = fs::read_to_string(&pid_path) {
+                let pid = value.trim();
+                let alive = Command::new("kill")
+                    .args(["-0", pid])
+                    .status()
+                    .map(|status| status.success())
+                    .unwrap_or(false);
+                if alive {
+                    return Err(format!("lightWeb 已经在运行，PID：{}", pid));
+                }
+            }
+            let output = build_project(&manifest_path, &options)?;
+            fs::create_dir_all(&state_dir)
+                .map_err(|e| format!("创建 Web 状态目录失败：{}", e))?;
+            let log_path = state_dir.join("web.log");
+            let log = fs::File::create(&log_path)
+                .map_err(|e| format!("创建 Web 日志失败：{}", e))?;
+            let child = Command::new(&output)
+                .current_dir(base)
+                .env("LIGHT_WEB_PORT", port.to_string())
+                .stdin(Stdio::null())
+                .stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?))
+                .stderr(Stdio::from(log))
+                .spawn()
+                .map_err(|e| format!("启动 lightWeb 失败：{}", e))?;
+            fs::write(&pid_path, child.id().to_string())
+                .map_err(|e| format!("写入 Web PID 失败：{}", e))?;
+            println!("lightWeb 已启动：http://127.0.0.1:{}", port);
+            println!("停止服务：lightGo web stop");
+            Ok(())
+        }
+        "stop" | "停止" => {
+            let value = fs::read_to_string(&pid_path)
+                .map_err(|_| "lightWeb 当前没有运行".to_string())?;
+            let pid = value.trim();
+            if pid.is_empty() {
+                return Err("Web PID 文件无效".into());
+            }
+            let status = Command::new("kill")
+                .args(["-TERM", pid])
+                .status()
+                .map_err(|e| format!("停止 lightWeb 失败：{}", e))?;
+            let _ = fs::remove_file(&pid_path);
+            if status.success() {
+                println!("lightWeb 已停止");
+                Ok(())
+            } else {
+                Err("lightWeb 进程未能停止".into())
+            }
+        }
+        other => Err(format!("未知 Web 命令：{}", other)),
+    }
+}
+
 fn parse_options(args: &[String]) -> Result<BuildOptions, String> {
     let mut options = BuildOptions {
         manifest_path: None,
         profile: "release".to_string(),
         target_dir: None,
+        port: None,
         cargo_args: Vec::new(),
         quiet: false,
     };
@@ -130,6 +209,11 @@ fn parse_options(args: &[String]) -> Result<BuildOptions, String> {
                 options.target_dir = Some(PathBuf::from(
                     args.get(index).ok_or("--target-dir 缺少路径")?,
                 ));
+            }
+            "--port" => {
+                index += 1;
+                let value = args.get(index).ok_or("--port 缺少数值")?;
+                options.port = Some(value.parse::<i64>().map_err(|_| "--port 必须是整数")?);
             }
             "--offline" => options.cargo_args.push("--offline".to_string()),
             "--locked" => options.cargo_args.push("--locked".to_string()),
@@ -384,9 +468,10 @@ fn create_project(args: &[String]) -> Result<(), String> {
 
 fn print_help() {
     println!("用法：lightGo <构建|运行|清理|删除|新建> [选项]");
+    println!("Web 命令：lightGo web start|stop 或 lightGo 网页 启动|停止 [--port 端口]");
     println!("常用选项：--release --debug --profile <名称> --target-dir <目录>");
     println!("Cargo 选项：--offline --locked --frozen -j/--jobs --features --all-features");
     println!("删除项目：lightGo 删除 <目录> [--yes]");
     println!("其他选项：--manifest-path <路径> -q/--quiet -v/--verbose");
-    println!("英文兼容命令：build、run、clean、delete、new");
+    println!("英文兼容命令：build、run、clean、delete、new、web");
 }
