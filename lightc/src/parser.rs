@@ -21,6 +21,12 @@ impl Parser {
         &self.tokens[self.pos].kind
     }
 
+    /// 向前查看第 offset 个记号（不消费）
+    fn peek_kind_at(&self, offset: usize) -> &TokenKind {
+        let index = (self.pos + offset).min(self.tokens.len() - 1);
+        &self.tokens[index].kind
+    }
+
     fn bump(&mut self) -> Token {
         let t = self.tokens[self.pos].clone();
         self.pos += 1;
@@ -207,9 +213,50 @@ impl Parser {
             }
             TokenKind::Print => {
                 self.bump();
-                let value = self.parse_expr()?;
+                if !matches!(self.peek_kind(), TokenKind::LParen) {
+                    let value = self.parse_expr()?;
+                    self.consume_line_end()?;
+                    return Ok(Stmt::Print(vec![value]));
+                }
+                // 打印(...) 的括号由打印语句自己处理：
+                //   打印("文本", 参数...)  格式化
+                //   打印(f"文本", 参数...) 格式化（f 前缀）
+                //   打印(1, 2)            保持原行为：打印元组
+                self.bump();
+                let mut f_prefix = false;
+                if matches!(self.peek_kind(), TokenKind::Ident(name) if name == "f")
+                    && matches!(self.peek_kind_at(1), TokenKind::Str(_))
+                {
+                    self.bump();
+                    f_prefix = true;
+                }
+                let first = self.parse_expr()?;
+                let mut values = vec![first.clone()];
+                // 字符串字面量里的 {名字} 占位符按作用域取值
+                let first_is_str = matches!(&first, Expr::Str(_));
+                let mut format_args = f_prefix
+                    || matches!(&first, Expr::Str(text) if text.contains('{') && text.contains('}'));
+                while matches!(self.peek_kind(), TokenKind::Comma) {
+                    self.bump();
+                    if matches!(self.peek_kind(), TokenKind::RParen) {
+                        break; // 允许尾随逗号
+                    }
+                    values.push(self.parse_expr()?);
+                    // 只有格式串是字符串时，后续参数才按位置填充
+                    format_args = format_args || first_is_str;
+                }
+                self.expect(TokenKind::RParen)?;
                 self.consume_line_end()?;
-                Ok(Stmt::Print(value))
+                if !format_args {
+                    // 非格式化：单值原样，多值保持旧的元组打印行为
+                    let value = if values.len() == 1 {
+                        values.remove(0)
+                    } else {
+                        Expr::Tuple(values)
+                    };
+                    return Ok(Stmt::Print(vec![value]));
+                }
+                Ok(Stmt::Print(values))
             }
             TokenKind::Throw => {
                 self.bump();
@@ -412,7 +459,7 @@ impl Parser {
     // ---- 表达式优先级（从低到高）----
     // or < and < not(unary) < 比较 < 加减 < 乘除 < 幂 < 一元(-) < 后缀(调用/索引) < 原子
 
-    fn parse_expr(&mut self) -> Result<Expr, String> {
+    pub fn parse_expr(&mut self) -> Result<Expr, String> {
         self.parse_or()
     }
 

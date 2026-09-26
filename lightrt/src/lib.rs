@@ -13,7 +13,7 @@
 //! 使 打印/字典查找 等操作能够在运行时正确区分整数、浮点、字符串与嵌套容器。
 
 use std::io::Write;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
 
@@ -24,6 +24,39 @@ static LIVE_ARRAY: AtomicUsize = AtomicUsize::new(0);
 static LIVE_STR: AtomicUsize = AtomicUsize::new(0);
 static LIVE_DICT: AtomicUsize = AtomicUsize::new(0);
 static LAST_ERROR: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+static REPL_SELECTED: AtomicI64 = AtomicI64::new(-1);
+static REPL_CURRENT: AtomicI64 = AtomicI64::new(-1);
+
+thread_local! {
+    /// 线程归属的 REPL 语句序号：主线程为 -2 表示跟随 light_repl_begin
+    static OWN_SLOT: std::cell::Cell<i64> = const { std::cell::Cell::new(-2) };
+}
+
+fn current_slot() -> i64 {
+    OWN_SLOT.with(|slot| {
+        let value = slot.get();
+        if value == -2 {
+            REPL_CURRENT.load(Ordering::SeqCst)
+        } else {
+            value
+        }
+    })
+}
+
+fn repl_visible() -> bool {
+    let selected = REPL_SELECTED.load(Ordering::SeqCst);
+    selected < 0 || current_slot() == selected
+}
+
+#[no_mangle]
+pub extern "C" fn light_repl_select(line: i64) {
+    REPL_SELECTED.store(line, Ordering::SeqCst);
+}
+
+#[no_mangle]
+pub extern "C" fn light_repl_begin(line: i64) {
+    REPL_CURRENT.store(line, Ordering::SeqCst);
+}
 
 // 元素标签
 pub const TAG_INT: u8 = 0;
@@ -174,12 +207,18 @@ fn free_val(tag: u8, v: i64) {
 // ---------------------------------------------------------------------------
 #[no_mangle]
 pub extern "C" fn light_print_int(value: i64) {
+    if !repl_visible() {
+        return;
+    }
     print!("{}", value);
     let _ = std::io::stdout().flush();
 }
 
 #[no_mangle]
 pub extern "C" fn light_print_float(value: f64) {
+    if !repl_visible() {
+        return;
+    }
     let mut s = format!("{}", value);
     // 保证至少有一个小数点，与 Python 风格一致
     if !s.contains('.') && !s.contains('e') && !s.contains('E') {
@@ -191,6 +230,9 @@ pub extern "C" fn light_print_float(value: f64) {
 
 #[no_mangle]
 pub extern "C" fn light_print_str(ptr: *const u8, len: usize) {
+    if !repl_visible() {
+        return;
+    }
     if ptr.is_null() {
         unsafe { abort("打印空字符串指针"); }
     }
@@ -203,11 +245,17 @@ pub extern "C" fn light_print_str(ptr: *const u8, len: usize) {
 
 #[no_mangle]
 pub extern "C" fn light_print_newline() {
+    if !repl_visible() {
+        return;
+    }
     println!();
 }
 
 #[no_mangle]
 pub extern "C" fn light_print_bool(value: bool) {
+    if !repl_visible() {
+        return;
+    }
     print!("{}", if value { "真" } else { "假" });
     let _ = std::io::stdout().flush();
 }
@@ -261,7 +309,10 @@ pub extern "C" fn light_thread_spawn(task: LightThreadTask, argument: i64) -> *m
     if task as usize == 0 {
         return std::ptr::null_mut();
     }
+    // 记录创建线程时所处的 REPL 语句序号，使线程输出归属正确
+    let owner = REPL_CURRENT.load(Ordering::SeqCst);
     let spawned = thread::Builder::new().spawn(move || {
+        OWN_SLOT.with(|slot| slot.set(owner));
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { task(argument) })) {
             Ok(value) => value,
             Err(_) => -1,
@@ -387,24 +438,149 @@ fn fmt_dict(d: *const LightDict) -> String {
 
 #[no_mangle]
 pub extern "C" fn light_print_value(v: i64, tag: i32) {
+    if !repl_visible() {
+        return;
+    }
     print!("{}", fmt_value(tag as u8, v));
     let _ = std::io::stdout().flush();
 }
 
+// ---------------------------------------------------------------------------
+// 格式化：把格式串中的占位符替换为运行时的值
+//   名字列表：NUL 分隔的 UTF-8 片段，与 vals 数组前 name_count 项一一对应
+//   位置参数：vals 数组中 name_count 之后的部分，可用 {} 或 {0} 引用
+// ---------------------------------------------------------------------------
+
+/// 按格式串生成新字符串；`{{` 与 `}}` 分别输出字面量 `{` 与 `}`。
+#[no_mangle]
+pub extern "C" fn light_format_v1(
+    fmt_ptr: *const u8,
+    fmt_len: usize,
+    names_ptr: *const u8,
+    names_len: usize,
+    vals: *const LightArray,
+    name_count: usize,
+) -> *mut LightStr {
+    let format = if fmt_ptr.is_null() {
+        String::new()
+    } else {
+        let bytes = unsafe { std::slice::from_raw_parts(fmt_ptr, fmt_len) };
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    let names: Vec<String> = if names_ptr.is_null() {
+        Vec::new()
+    } else {
+        let bytes = unsafe { std::slice::from_raw_parts(names_ptr, names_len) };
+        bytes
+            .split(|b| *b == 0)
+            .filter(|part| !part.is_empty())
+            .map(|part| String::from_utf8_lossy(part).into_owned())
+            .collect()
+    };
+    let array = if vals.is_null() {
+        None
+    } else {
+        Some(unsafe { &*vals })
+    };
+    let fetch = |tag: u8, value: i64| -> String { fmt_value(tag, value) };
+    let named = |name: &str| -> Option<String> {
+        let index = names.iter().position(|item| item == name)?;
+        let array = array?;
+        if index >= array.len {
+            return None;
+        }
+        Some(fetch(array.tags[index], array.data[index]))
+    };
+    let positional = |index: usize| -> Option<String> {
+        let array = array?;
+        let real = name_count + index;
+        if real >= array.len {
+            return None;
+        }
+        Some(fetch(array.tags[real], array.data[real]))
+    };
+
+    let mut out = String::with_capacity(format.len() + 16);
+    let chars: Vec<char> = format.chars().collect();
+    let mut index = 0usize;
+    let mut auto = 0usize;
+    while index < chars.len() {
+        let current = chars[index];
+        if current == '{' {
+            if index + 1 < chars.len() && chars[index + 1] == '{' {
+                out.push('{');
+                index += 2;
+                continue;
+            }
+            match chars[index..].iter().position(|c| *c == '}') {
+                Some(offset) => {
+                    let key: String = chars[index + 1..index + offset].iter().collect();
+                    let key = key.trim().to_string();
+                    let replacement = if key.is_empty() {
+                        let value = positional(auto);
+                        auto += 1;
+                        value
+                    } else if key.chars().all(|c| c.is_ascii_digit()) {
+                        match key.parse::<usize>() {
+                            Ok(position) => positional(position),
+                            Err(_) => None,
+                        }
+                    } else {
+                        named(&key)
+                    };
+                    match replacement {
+                        Some(text) => out.push_str(&text),
+                        None => {
+                            // 找不到对应值时保留占位符原样
+                            out.push('{');
+                            out.push_str(&key);
+                            out.push('}');
+                        }
+                    }
+                    index += offset + 1;
+                    continue;
+                }
+                None => {
+                    out.push('{');
+                    index += 1;
+                    continue;
+                }
+            }
+        }
+        if current == '}' && index + 1 < chars.len() && chars[index + 1] == '}' {
+            out.push('}');
+            index += 2;
+            continue;
+        }
+        out.push(current);
+        index += 1;
+    }
+    make_str(out.into_bytes())
+}
+
 #[no_mangle]
 pub extern "C" fn light_print_array(arr: *const LightArray) {
+    if !repl_visible() {
+        return;
+    }
     print!("{}", fmt_array(arr, false));
     let _ = std::io::stdout().flush();
 }
 
 #[no_mangle]
 pub extern "C" fn light_print_tuple(arr: *const LightArray) {
+    if !repl_visible() {
+        return;
+    }
     print!("{}", fmt_array(arr, true));
     let _ = std::io::stdout().flush();
 }
 
 #[no_mangle]
 pub extern "C" fn light_print_dict(d: *const LightDict) {
+    if !repl_visible() {
+        return;
+    }
     print!("{}", fmt_dict(d));
     let _ = std::io::stdout().flush();
 }
@@ -549,6 +725,16 @@ fn array_free_raw(arr: *mut LightArray) {
 #[no_mangle]
 pub extern "C" fn light_array_free(arr: *mut LightArray) {
     array_free_raw(arr);
+}
+
+/// 只释放数组容器，不释放元素：元素为借用引用时使用（如格式化参数表）
+#[no_mangle]
+pub extern "C" fn light_array_free_shallow(arr: *mut LightArray) {
+    if arr.is_null() {
+        return;
+    }
+    drop(unsafe { Box::from_raw(arr) });
+    LIVE_ARRAY.fetch_sub(1, Ordering::SeqCst);
 }
 
 fn array_clone_raw(arr: *const LightArray) -> *mut LightArray {

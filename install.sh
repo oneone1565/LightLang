@@ -83,13 +83,14 @@ confirm() {
 
 if [[ "$uninstall" == true ]]; then
     confirm
-    as_root rm -f "$prefix/bin/lightc" "$prefix/bin/lightGo" "$prefix/lib/liblightrt.a" "$prefix/etc/profile.d/lightlang.sh"
+    as_root rm -f "$prefix/bin/light" "$prefix/bin/lightc" "$prefix/bin/lightGo" "$prefix/lib/liblightrt.a" "$prefix/etc/profile.d/lightlang.sh"
     as_root rm -rf "$prefix/share/light-lang"
     printf '%s\n' "LightLang 已卸载"
     exit 0
 fi
 
 required_files=(
+    "$script_dir/bin/light"
     "$script_dir/bin/lightc"
     "$script_dir/bin/lightGo"
     "$script_dir/lib/liblightrt.a"
@@ -102,6 +103,7 @@ for file in "${required_files[@]}"; do
 done
 
 confirm
+as_root install -Dm755 "$script_dir/bin/light" "$prefix/bin/light"
 as_root install -Dm755 "$script_dir/bin/lightc" "$prefix/bin/lightc"
 as_root install -Dm755 "$script_dir/bin/lightGo" "$prefix/bin/lightGo"
 as_root install -Dm644 "$script_dir/lib/liblightrt.a" "$prefix/lib/liblightrt.a"

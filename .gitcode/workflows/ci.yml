@@ -1,0 +1,350 @@
+name: LightLang CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+env:
+  LIGHT_VERSION: "0.2.1"
+
+jobs:
+  # =====================================================================
+  # Linux x86_64：glibc ELF + musl 静态 ELF，并跑冒烟测试、打包发行版
+  # =====================================================================
+  linux-elf:
+    name: Linux ELF x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: checkout
+
+      - name: 安装 Clang 与交叉工具链
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf file
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: 编译 release（glibc）
+        run: cargo build --release
+
+      - name: 编译 release（musl 静态）
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: 检查编译警告
+        run: |
+          if touch lightc/src/main.rs lightrt/src/lib.rs light/src/main.rs && \
+             cargo build --release 2>&1 | grep -qE "^warning"; then
+            echo "存在编译警告，请先修复"
+            exit 1
+          fi
+
+      - name: 校验产物为 ELF
+        run: |
+          set -euo pipefail
+          for bin in light lightc lightGo; do
+            file "target/release/$bin" | grep -q "ELF 64-bit" || { echo "$bin 不是 ELF"; exit 1; }
+            file "target/x86_64-unknown-linux-musl/release/$bin" | grep -q "ELF 64-bit" || { echo "$bin musl 版不是 ELF"; exit 1; }
+            echo "$bin => $(file -b "target/release/$bin" | cut -d, -f1-2)"
+          done
+          file target/x86_64-unknown-linux-musl/release/lightc | grep -q "statically linked" \
+            || { echo "musl 版应为静态链接"; exit 1; }
+
+      - name: 检查版本号一致
+        run: |
+          set -euo pipefail
+          for bin in lightc light lightGo; do
+            printf '%s: ' "$bin"
+            "./target/release/$bin" --version
+          done
+          for crate in light lightc lightrt lightgo lightweb; do
+            grep -q "^version = \"$LIGHT_VERSION\"" "$crate/Cargo.toml" \
+              || { echo "$crate 版本号不是 $LIGHT_VERSION"; exit 1; }
+          done
+
+      - name: 冒烟测试：运行示例
+        run: |
+          set -euo pipefail
+          export PATH="$PWD/target/release:$PATH"
+          light examples/hello.light
+          light examples/arithmetic.light
+          light examples/compound.light
+          light examples/string_methods.light
+          light examples/assert.light
+
+      - name: 冒烟测试：打印格式化
+        run: |
+          set -euo pipefail
+          export PATH="$PWD/target/release:$PATH"
+          work="$(mktemp -d)"
+          cat > "$work/demo.light" <<'LIGHT'
+          名字 = "LightLang"
+          版本 = 2
+          打印("你好，{名字}！")
+          打印("下个版本 {版本 + 1}")
+          打印(f"f 前缀：{名字}")
+          打印("{} 与 {}", "甲", "乙")
+          打印("{1} 在 {0} 前面", "甲", "乙")
+          打印("转义 {{ok}}")
+          LIGHT
+          light "$work/demo.light"
+
+      - name: 冒烟测试：交互模式
+        run: |
+          set -euo pipefail
+          export PATH="$PWD/target/release:$PATH"
+          printf 'a = 6\n打印("a={a}")\n函数 平方(n):\n    返回 n * n\n\n打印("平方 {平方(7)}")\n' | light
+
+      - name: 冒烟测试：项目工具
+        run: |
+          set -euo pipefail
+          export PATH="$PWD/target/release:$PATH"
+          cd lightgo/examples/page
+          lightGo 构建 --offline
+          test -x target/release/page_demo
+
+      - name: 打包发行版
+        run: |
+          set -euo pipefail
+          stage="dist/light-lang-$LIGHT_VERSION"
+          mkdir -p "$stage/bin" "$stage/lib" "$stage/share/light-lang"
+          cp target/release/light target/release/lightc target/release/lightGo "$stage/bin/"
+          cp target/release/liblightrt.a "$stage/lib/"
+          cp install.sh LICENSE README.md "$stage/"
+          cp -R examples "$stage/share/light-lang/examples"
+          cp -R skills "$stage/share/light-lang/skills"
+          mkdir -p "$stage/share/light-lang/lightrt/src" "$stage/share/light-lang/lightweb/src"
+          cp lightrt/Cargo.toml "$stage/share/light-lang/lightrt/"
+          cp lightrt/src/lib.rs "$stage/share/light-lang/lightrt/src/"
+          cp lightweb/Cargo.toml "$stage/share/light-lang/lightweb/"
+          cp lightweb/src/lib.rs "$stage/share/light-lang/lightweb/src/"
+          chmod +x "$stage/bin/"* "$stage/install.sh"
+          (cd dist && tar -czf "light-lang-$LIGHT_VERSION-linux-x86_64.tar.gz" "light-lang-$LIGHT_VERSION")
+          (cd dist && sha256sum *.tar.gz | tee dist/sha256sum.txt)
+
+      - name: 上传 Linux x86_64 构建物
+        uses: actions/upload-artifact@v4
+        with:
+          name: light-lang-linux-x86_64
+          path: |
+            dist/*.tar.gz
+            dist/sha256sum.txt
+            target/release/light
+            target/release/lightc
+            target/release/lightGo
+            target/x86_64-unknown-linux-musl/release/light
+            target/x86_64-unknown-linux-musl/release/lightc
+            target/x86_64-unknown-linux-musl/release/lightGo
+            target/release/liblightrt.a
+
+  # =====================================================================
+  # Linux ARM：aarch64（glibc + musl 静态）与 armv7 交叉编译
+  # =====================================================================
+  linux-arm:
+    name: Linux ELF ARM
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: checkout
+
+      - name: 安装交叉工具链
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf file
+          rustup target add aarch64-unknown-linux-gnu aarch64-unknown-linux-musl armv7-unknown-linux-gnueabihf
+
+      - name: 编译 aarch64（glibc）
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release --target aarch64-unknown-linux-gnu
+
+      - name: 编译 aarch64（musl 静态）
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+        run: cargo build --release --target aarch64-unknown-linux-musl
+
+      - name: 编译 armv7
+        env:
+          CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
+        run: cargo build --release --target armv7-unknown-linux-gnueabihf
+
+      - name: 校验 ARM 产物
+        run: |
+          set -euo pipefail
+          check() {
+            file "$1" | grep -q "$2" || { echo "$1 不是 $2"; exit 1; }
+            echo "$1 => $(file -b "$1" | cut -d, -f1-2)"
+          }
+          for bin in light lightc lightGo; do
+            check "target/aarch64-unknown-linux-gnu/release/$bin" "ARM aarch64"
+            check "target/aarch64-unknown-linux-musl/release/$bin" "ARM aarch64"
+            check "target/armv7-unknown-linux-gnueabihf/release/$bin" "ARM"
+          done
+          file target/aarch64-unknown-linux-musl/release/lightc | grep -q "statically linked" \
+            || { echo "aarch64 musl 版应为静态链接"; exit 1; }
+
+      - name: 上传 Linux ARM 构建物
+        uses: actions/upload-artifact@v4
+        with:
+          name: light-lang-linux-arm
+          path: |
+            target/aarch64-unknown-linux-gnu/release/light
+            target/aarch64-unknown-linux-gnu/release/lightc
+            target/aarch64-unknown-linux-gnu/release/lightGo
+            target/aarch64-unknown-linux-gnu/release/liblightrt.a
+            target/aarch64-unknown-linux-musl/release/light
+            target/aarch64-unknown-linux-musl/release/lightc
+            target/aarch64-unknown-linux-musl/release/lightGo
+            target/armv7-unknown-linux-gnueabihf/release/light
+            target/armv7-unknown-linux-gnueabihf/release/lightc
+            target/armv7-unknown-linux-gnueabihf/release/lightGo
+
+  # =====================================================================
+  # Windows x64：MSVC 工具链（可执行冒烟测试）
+  # =====================================================================
+  windows-msvc:
+    name: Windows MSVC x64
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: checkout
+
+      - name: 添加目标
+        run: rustup target add x86_64-pc-windows-msvc
+
+      - name: 编译 release
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: 校验产物为 PE
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($bin in @("light", "lightc", "lightGo")) {
+            $path = "target/x86_64-pc-windows-msvc/release/$bin.exe"
+            if (-not (Test-Path $path)) { throw "$path 不存在" }
+            Write-Host "$bin => $((Get-Item $path).Length) 字节"
+          }
+
+      - name: 版本自检
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dir = "target/x86_64-pc-windows-msvc/release"
+          & "$dir/lightc.exe" --version
+          & "$dir/light.exe" --version
+          & "$dir/lightGo.exe" --version
+
+      - name: 冒烟测试：编译并运行 Light 程序
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dir = "target/x86_64-pc-windows-msvc/release"
+          $work = Join-Path $env:RUNNER_TEMP "lightdemo"
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+          @"
+          名字 = "LightLang"
+          打印("你好，{名字}！")
+          打印("2 + 3 = {2 + 3}")
+          "@ | Set-Content -Path (Join-Path $work "demo.light") -Encoding UTF8
+          & "$dir/lightc.exe" (Join-Path $work "demo.light") -o (Join-Path $work "demo.exe")
+          & (Join-Path $work "demo.exe")
+
+      - name: 上传 Windows MSVC 构建物
+        uses: actions/upload-artifact@v4
+        with:
+          name: light-lang-windows-msvc
+          path: |
+            target/x86_64-pc-windows-msvc/release/light.exe
+            target/x86_64-pc-windows-msvc/release/lightc.exe
+            target/x86_64-pc-windows-msvc/release/lightGo.exe
+            target/x86_64-pc-windows-msvc/release/lightrt.lib
+
+  # =====================================================================
+  # Windows x64：MinGW（GNU）工具链
+  # =====================================================================
+  windows-mingw:
+    name: Windows MinGW x64
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: checkout
+
+      - name: 安装 MinGW
+        shell: pwsh
+        run: |
+          choco install mingw -y --no-progress
+          echo "C:\ProgramData\mingw64\mingw64\bin" >> $env:GITHUB_PATH
+          echo "C:\ProgramData\mingw64\mingw64\bin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: 添加 GNU 目标
+        run: rustup target add x86_64-pc-windows-gnu
+
+      - name: 编译 release
+        run: cargo build --release --target x86_64-pc-windows-gnu
+
+      - name: 校验产物为 PE
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($bin in @("light", "lightc", "lightGo")) {
+            $path = "target/x86_64-pc-windows-gnu/release/$bin.exe"
+            if (-not (Test-Path $path)) { throw "$path 不存在" }
+          }
+          gcc --version | Select-Object -First 1
+
+      - name: 版本自检
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dir = "target/x86_64-pc-windows-gnu/release"
+          & "$dir/lightc.exe" --version
+          & "$dir/light.exe" --version
+          & "$dir/lightGo.exe" --version
+
+      - name: 上传 Windows MinGW 构建物
+        uses: actions/upload-artifact@v4
+        with:
+          name: light-lang-windows-mingw
+          path: |
+            target/x86_64-pc-windows-gnu/release/light.exe
+            target/x86_64-pc-windows-gnu/release/lightc.exe
+            target/x86_64-pc-windows-gnu/release/lightGo.exe
+            target/x86_64-pc-windows-gnu/release/liblightrt.a
+
+  # =====================================================================
+  # Windows ARM64：MSVC 交叉编译（仅构建，x64 机器无法运行）
+  # =====================================================================
+  windows-arm64:
+    name: Windows ARM64
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: checkout
+
+      - name: 添加 ARM64 目标
+        run: rustup target add aarch64-pc-windows-msvc
+
+      - name: 编译 release
+        run: cargo build --release --target aarch64-pc-windows-msvc
+
+      - name: 校验产物为 PE
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($bin in @("light", "lightc", "lightGo")) {
+            $path = "target/aarch64-pc-windows-msvc/release/$bin.exe"
+            if (-not (Test-Path $path)) { throw "$path 不存在" }
+          }
+
+      - name: 上传 Windows ARM64 构建物
+        uses: actions/upload-artifact@v4
+        with:
+          name: light-lang-windows-arm64
+          path: |
+            target/aarch64-pc-windows-msvc/release/light.exe
+            target/aarch64-pc-windows-msvc/release/lightc.exe
+            target/aarch64-pc-windows-msvc/release/lightGo.exe
+            target/aarch64-pc-windows-msvc/release/lightrt.lib

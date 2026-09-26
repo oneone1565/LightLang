@@ -214,7 +214,12 @@ fn analyze_stmt(stmt: &Stmt, fname: &str, locals: &HashMap<String, Ty>,
             analyze_expr(target, fname, locals, env, cons);
             analyze_expr(value, fname, locals, env, cons);
         }
-        Stmt::Expr(e) | Stmt::Print(e) | Stmt::Style(e) => analyze_expr(e, fname, locals, env, cons),
+        Stmt::Expr(e) | Stmt::Style(e) => analyze_expr(e, fname, locals, env, cons),
+        Stmt::Print(values) => {
+            for value in values {
+                analyze_expr(value, fname, locals, env, cons);
+            }
+        }
         Stmt::Thread { body, .. } | Stmt::Page { body, .. } => {
             for s in &body.stmts {
                 analyze_stmt(s, fname, locals, env, cons);

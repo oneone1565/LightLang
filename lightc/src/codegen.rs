@@ -77,6 +77,7 @@ pub struct CodeGen<'a> {
     deferred: Vec<String>,
     page_mode: bool,
     debug_assertions: bool,
+    repl_line: Option<i64>,
     target_triple: String,
 }
 
@@ -111,6 +112,11 @@ const RUNTIME_DECLS: &[&str] = &[
     "declare ptr @light_thread_spawn(ptr, i64)",
     "declare i64 @light_thread_join(ptr)",
     "declare i64 @light_thread_join_all()",
+    "declare void @light_repl_select(i64)",
+    "declare void @light_repl_begin(i64)",
+    "declare ptr @light_format_v1(ptr, i64, ptr, i64, ptr, i64)",
+    "declare void @light_array_free_shallow(ptr)",
+    "declare void @light_array_set_tag(ptr, i64, i32, i64)",
     "declare ptr @light_array_new(i64)",
     "declare i64 @light_array_get(ptr, i64)",
     "declare void @light_array_set(ptr, i64, i64)",
@@ -182,7 +188,12 @@ const RUNTIME_DECLS: &[&str] = &[
 ];
 
 impl<'a> CodeGen<'a> {
-    pub fn new(env: &'a typeinfer::TypeEnv, target_triple: String, debug_assertions: bool) -> Self {
+    pub fn new(
+        env: &'a typeinfer::TypeEnv,
+        target_triple: String,
+        debug_assertions: bool,
+        repl_line: Option<i64>,
+    ) -> Self {
         CodeGen {
             out: String::new(),
             tmp: 0,
@@ -194,6 +205,7 @@ impl<'a> CodeGen<'a> {
             deferred: Vec::new(),
             page_mode: false,
             debug_assertions,
+            repl_line,
             target_triple,
         }
     }
@@ -469,8 +481,19 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             self.emit("entry:");
             let scope = Scope { vars: HashMap::new(), owned: Vec::new() };
             let mut scopes = vec![scope];
-            for stmt in &top_stmts {
-                self.gen_stmt(stmt, &mut scopes)?;
+            if let Some(line) = self.repl_line {
+                self.emit(&format!("  call void @light_repl_select(i64 {})", line));
+            }
+            for (index, item) in program.items.iter().enumerate() {
+                if self.repl_line.is_some() {
+                    self.emit(&format!(
+                        "  call void @light_repl_begin(i64 {})",
+                        index + 1
+                    ));
+                }
+                if let Item::Stmt(stmt) = item {
+                    self.gen_stmt(stmt, &mut scopes)?;
+                }
             }
             if has_page {
                 self.emit("  call i64 @light_web_run_v1(i64 0)");
@@ -659,6 +682,189 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         self.emit("  unreachable");
         self.emit(&format!("{}:", ok));
         Ok(())
+    }
+
+    /// 提取格式串中的 `{名字}` / `{表达式}` 占位符（忽略 `{}`、`{0}` 与 `{{`、`}}`）
+    fn placeholder_names(format: &str) -> Vec<String> {
+        let chars: Vec<char> = format.chars().collect();
+        let mut names: Vec<String> = Vec::new();
+        let mut index = 0usize;
+        while index < chars.len() {
+            if chars[index] != '{' {
+                index += 1;
+                continue;
+            }
+            if index + 1 < chars.len() && chars[index + 1] == '{' {
+                index += 2;
+                continue;
+            }
+            match chars[index..].iter().position(|c| *c == '}') {
+                Some(offset) => {
+                    let key: String = chars[index + 1..index + offset].iter().collect();
+                    let key = key.trim().to_string();
+                    if !key.is_empty()
+                        && !key.chars().all(|c| c.is_ascii_digit())
+                        && !names.contains(&key)
+                    {
+                        names.push(key);
+                    }
+                    index += offset + 1;
+                }
+                None => break,
+            }
+        }
+        names
+    }
+
+    /// 占位符内容是否是简单标识符（可直接查作用域）
+    fn is_plain_identifier(text: &str) -> bool {
+        // 字面量关键字走表达式路径
+        if matches!(text, "真" | "假" | "空") {
+            return false;
+        }
+        let mut chars = text.chars();
+        match chars.next() {
+            Some(first) if first.is_alphabetic() || first == '_' => {}
+            _ => return false,
+        }
+        text.chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+    }
+
+    /// 把 `{...}` 里的内容当作表达式解析
+    fn parse_placeholder_expr(text: &str) -> Result<Expr, String> {
+        let tokens = crate::lexer::Lexer::new(text)
+            .tokenize()
+            .map_err(|e| format!("格式化占位符 {{{}}} 解析失败：{}", text, e))?;
+        let mut parser = crate::parser::Parser::new(tokens);
+        let expr = parser
+            .parse_expr()
+            .map_err(|e| format!("格式化占位符 {{{}}} 解析失败：{}", text, e))?;
+        Ok(expr)
+    }
+
+    /// 是否需要走格式化路径：带参数，或字符串字面量里含占位符
+    fn print_needs_format(exprs: &[Expr]) -> bool {        if exprs.len() > 1 {
+            return true;
+        }
+        match exprs.first() {
+            Some(Expr::Str(text)) => {
+                Self::placeholder_names(text).len() > 0
+                    || text.contains("{}")
+                    || text.contains("{0")
+                    || text.contains("{{")
+                    || text.contains("}}")
+            }
+            _ => false,
+        }
+    }
+
+    /// 生成格式化字符串：按 `{名字}` 取作用域变量，按 `{}` / `{0}` 取位置参数
+    fn gen_format_string(&mut self, exprs: &[Expr], scopes: &mut Vec<Scope>) -> Result<String, String> {
+        let first = exprs.first().ok_or_else(|| "打印缺少格式串".to_string())?;
+        // 1. 格式串：字面量直接用常量，其他取表达式的字符串内容
+        let (fmt_ptr, fmt_len) = match first {
+            Expr::Str(text) => {
+                let (gep, len) = self.emit_str_const(text);
+                let p = self.fresh();
+                self.emit(&format!("  {} = bitcast ptr {} to ptr", p, gep));
+                let l = self.fresh();
+                self.emit(&format!("  {} = add i64 {}, 0", l, len));
+                (p, l)
+            }
+            other => {
+                let (reg, ty) = self.gen_expr(other, scopes)?;
+                if !matches!(ty, Ty::Str) {
+                    return Err("打印的格式串必须是字符串".into());
+                }
+                let p = self.i64_to_ptr(&reg);
+                let data = self.fresh();
+                self.emit(&format!("  {} = call ptr @light_str_ptr(ptr {})", data, p));
+                let len = self.fresh();
+                self.emit(&format!("  {} = call i64 @light_str_len(ptr {})", len, p));
+                if !matches!(other, Expr::Ident(_)) {
+                    self.emit(&format!("  call void @light_str_free(ptr {})", p));
+                }
+                (data, len)
+            }
+        };
+
+        // 2. 名字表：只对字符串字面量做编译期检查
+        //    占位符内容若是标识符则查作用域，否则按表达式解析（与 Python f-string 一致）
+        let mut owned_temps: Vec<(String, Ty)> = Vec::new();
+        let mut entries: Vec<(Option<String>, String, i32)> = Vec::new();
+        if let Expr::Str(text) = first {
+            for name in Self::placeholder_names(text) {
+                let (raw, ty) = if Self::is_plain_identifier(&name) {
+                    let (slot, ty) = self
+                        .lookup(scopes, &name)
+                        .ok_or_else(|| format!("未定义变量：{}", name))?;
+                    let value = self.load_value(&slot, ty.clone());
+                    (self.value_as_i64(&value, &ty), ty)
+                } else {
+                    let expr = Self::parse_placeholder_expr(&name)?;
+                    let (reg, ty) = self.gen_expr(&expr, scopes)?;
+                    if !matches!(expr, Expr::Ident(_)) && ty.is_owned() {
+                        owned_temps.push((reg.clone(), ty.clone()));
+                    }
+                    (self.value_as_i64(&reg, &ty), ty)
+                };
+                entries.push((Some(name), raw, Self::value_tag(&ty)));
+            }
+        }
+        let name_count = entries.len();
+
+        // 3. 位置参数
+        for expr in exprs.iter().skip(1) {
+            let (reg, ty) = self.gen_expr(expr, scopes)?;
+            if !matches!(expr, Expr::Ident(_)) && ty.is_owned() {
+                owned_temps.push((reg.clone(), ty.clone()));
+            }
+            let raw = self.value_as_i64(&reg, &ty);
+            entries.push((None, raw, Self::value_tag(&ty)));
+        }
+        let total = entries.len();
+
+        // 4. 参数表
+        let arr = self.fresh();
+        self.emit(&format!("  {} = call ptr @light_array_new(i64 {})", arr, total));
+        for (index, (_, raw, tag)) in entries.iter().enumerate() {
+            let raw = self.value_as_i64(raw, &Ty::Int);
+            self.emit(&format!(
+                "  call void @light_array_set_tag(ptr {}, i64 {}, i32 {}, i64 {})",
+                arr, index, tag, raw
+            ));
+        }
+
+        // 5. 名字表常量
+        let mut blob = String::new();
+        for (name, _, _) in entries.iter().take(name_count) {
+            if let Some(name) = name {
+                blob.push_str(name);
+                blob.push('\0');
+            }
+        }
+        let (names_ptr, names_len) = if blob.is_empty() {
+            ("null".to_string(), "0".to_string())
+        } else {
+            let (gep, len) = self.emit_str_const(&blob);
+            let p = self.fresh();
+            self.emit(&format!("  {} = bitcast ptr {} to ptr", p, gep));
+            let l = self.fresh();
+            self.emit(&format!("  {} = add i64 {}, 0", l, len));
+            (p, l)
+        };
+
+        let result = self.fresh();
+        self.emit(&format!(
+            "  {} = call ptr @light_format_v1(ptr {}, i64 {}, ptr {}, i64 {}, ptr {}, i64 {})",
+            result, fmt_ptr, fmt_len, names_ptr, names_len, arr, name_count
+        ));
+        self.emit(&format!("  call void @light_array_free_shallow(ptr {})", arr));
+        for (reg, ty) in owned_temps {
+            self.free_value(&reg, &ty);
+        }
+        Ok(result)
     }
 
     fn gen_page_print(&mut self, expr: &Expr, scopes: &mut Vec<Scope>) -> Result<(), String> {
@@ -851,10 +1057,31 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 }
             }
             Stmt::Style(_) => return Err("样式只能写在页面代码块中".into()),
-            Stmt::Print(e) if self.page_mode => {
-                self.gen_page_print(e, scopes)?;
+            Stmt::Print(exprs) if self.page_mode => {
+                if Self::print_needs_format(exprs) {
+                    let text = self.gen_format_string(exprs, scopes)?;
+                    let data = self.fresh();
+                    self.emit(&format!("  {} = call ptr @light_str_ptr(ptr {})", data, text));
+                    let len = self.fresh();
+                    self.emit(&format!("  {} = call i64 @light_str_len(ptr {})", len, text));
+                    self.emit(&format!("  call void @light_page_append_str(ptr {}, i64 {})", data, len));
+                    self.emit(&format!("  call void @light_str_free(ptr {})", text));
+                } else {
+                    self.gen_page_print(&exprs[0], scopes)?;
+                }
             }
-            Stmt::Print(e) => {
+            Stmt::Print(exprs) if Self::print_needs_format(exprs) => {
+                let text = self.gen_format_string(exprs, scopes)?;
+                let data = self.fresh();
+                self.emit(&format!("  {} = call ptr @light_str_ptr(ptr {})", data, text));
+                let len = self.fresh();
+                self.emit(&format!("  {} = call i64 @light_str_len(ptr {})", len, text));
+                self.emit(&format!("  call void @light_print_str(ptr {}, i64 {})", data, len));
+                self.emit("  call void @light_print_newline()");
+                self.emit(&format!("  call void @light_str_free(ptr {})", text));
+            }
+            Stmt::Print(exprs) => {
+                let e = &exprs[0];
                 let (reg, ty) = self.gen_expr(e, scopes)?;
                 match ty {
                     Ty::Int => {

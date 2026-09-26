@@ -1,10 +1,10 @@
 [package]
-name = "lightc"
+name = "light"
 version = "0.2.1"
 edition = "2021"
 
 [[bin]]
-name = "lightc"
+name = "light"
 path = "src/main.rs"
 
 [dependencies]

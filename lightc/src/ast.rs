@@ -36,7 +36,9 @@ pub enum Stmt {
     Let { name: String, value: Expr },
     Assign { target: Expr, value: Expr },
     Expr(Expr),
-    Print(Expr),
+    /// 打印：首项为格式串或值，其余为按位置填充的参数
+    /// 支持 `打印("hi,{名字}")`（按作用域取值）与 `打印("hi,{0}", 名字)`（显式传参）
+    Print(Vec<Expr>),
     Style(Expr),
     Assert { condition: Expr, message: Option<Expr> },
     Throw(Expr),

@@ -24,7 +24,7 @@ fn main() {
         return;
     }
     if args.len() < 2 {
-        eprintln!("用法：lightc <输入.light> [-o 输出] [--native 名称=静态库路径] [--no-lightrt] [--emit-llvm] [--emit-asm] [--no-link]");
+            eprintln!("用法：lightc <输入.light> [-o 输出] [--native 名称=静态库路径] [--no-lightrt] [--emit-llvm] [--emit-asm] [--no-link] [--debug] [--quiet] [--repl-line 行号]");
         std::process::exit(1);
     }
 
@@ -36,6 +36,8 @@ fn main() {
     let mut no_link = false;
     let mut no_lightrt = false;
     let mut debug_assertions = false;
+    let mut repl_line: Option<i64> = None;
+    let mut quiet = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -67,6 +69,24 @@ fn main() {
             "--no-link" => no_link = true,
             "--no-lightrt" => no_lightrt = true,
             "--debug" => debug_assertions = true,
+            "--quiet" | "-q" => quiet = true,
+            "--repl-line" => {
+                i += 1;
+                let raw = match args.get(i) {
+                    Some(value) => value,
+                    None => {
+                        eprintln!("--repl-line 需要行号");
+                        std::process::exit(1);
+                    }
+                };
+                match raw.parse::<i64>() {
+                    Ok(line) => repl_line = Some(line),
+                    Err(_) => {
+                        eprintln!("无效的 --repl-line 参数：{}", raw);
+                        std::process::exit(1);
+                    }
+                }
+            }
             s if !s.starts_with('-') => input = Some(s.to_string()),
             other => {
                 eprintln!("未知参数：{}", other);
@@ -108,7 +128,7 @@ fn main() {
     let clang = find_clang();
     let target_triple = detect_target_triple(&clang);
 
-    let mut cg = codegen::CodeGen::new(&env, target_triple, debug_assertions);
+    let mut cg = codegen::CodeGen::new(&env, target_triple, debug_assertions, repl_line);
     let ir = match cg.gen(&program) {
         Ok(ir) => ir,
         Err(e) => {
@@ -149,7 +169,9 @@ fn main() {
         if !status.success() {
             std::process::exit(1);
         }
-        println!("汇编已生成：{}", asm_path);
+        if !quiet {
+            println!("汇编已生成：{}", asm_path);
+        }
         let _ = fs::remove_file(&ll_path);
         if no_link {
             return;
@@ -164,7 +186,9 @@ fn main() {
             std::process::exit(1);
         }
         link(&clang, &obj_path, &rt_lib, &out_exe, &extra_libs, !no_lightrt);
-        println!("可执行文件：{}", out_exe);
+        if !quiet {
+            println!("可执行文件：{}", out_exe);
+        }
         let _ = fs::remove_file(&ll_path);
         let _ = fs::remove_file(&obj_path);
         let _ = fs::remove_file(&asm_path);
@@ -180,7 +204,9 @@ fn main() {
         if !status.success() {
             std::process::exit(1);
         }
-        println!("目标文件：{}", obj_path);
+        if !quiet {
+            println!("目标文件：{}", obj_path);
+        }
         let _ = fs::remove_file(&ll_path);
         return;
     }
@@ -195,7 +221,9 @@ fn main() {
         std::process::exit(1);
     }
     link(&clang, &obj_path, &rt_lib, &out_exe, &extra_libs, !no_lightrt);
-    println!("可执行文件：{}", out_exe);
+    if !quiet {
+        println!("可执行文件：{}", out_exe);
+    }
     let _ = fs::remove_file(&ll_path);
     let _ = fs::remove_file(&obj_path);
 }

@@ -52,7 +52,51 @@ lightc hello.light -o hello
 ./hello
 ```
 
-### 2. 中文语法，面向快速表达
+也可以使用 `light` 直接运行源码：
+
+```bash
+light hello.light
+```
+
+`light` 会把程序临时编译到系统临时目录，运行结束后自动清理；使用 `--debug` 可以启用 Debug 断言。
+
+### 2. 交互模式：像 Python 一样逐句执行
+
+不带任何文件参数运行 `light`，即可进入交互模式：
+
+```bash
+light
+```
+
+```text
+LightLang 0.2.1 交互模式（输入 退出 结束会话，输入 帮助 查看命令）
+>>> 名字 = "LightLang"
+>>> 打印 "你好，" + 名字
+你好，LightLang
+>>> 函数 平方(n):
+...     返回 n * n
+>>> 打印 平方(7)
+49
+```
+
+每输入一句就编译并执行整段会话，因此变量、函数都会保留；输出只显示当前这一句的结果，不会重复打印之前的内容。
+
+以 `:` 结尾的语句（函数、`如果`、`当` 等）可以跨行输入，缩进回退到顶层或输入空行时执行。
+
+交互命令：
+
+| 命令 | 说明 |
+| --- | --- |
+| `退出` / `exit` | 结束会话 |
+| `帮助` / `help` | 显示命令帮助 |
+| `清屏` / `clear` | 清空屏幕 |
+| `重置` / `reset` | 清空当前会话变量 |
+| `打印历史` | 显示已输入的语句 |
+| `保存 <文件>` | 把当前会话保存为 `.light` 源文件 |
+
+会话源码写在当前目录，因此 `导入 "模块名"` 会像普通脚本一样按当前目录解析。编译或运行失败时，该句会被丢弃，可以直接改正后重输。
+
+### 3. 中文语法，面向快速表达
 
 语言保留了清晰的中文关键字，让代码更接近自然语言：
 
@@ -66,13 +110,47 @@ lightc hello.light -o hello
 
 当前语言已经提供字符串、整数、浮点数、布尔值、空值、列表、元组和字典等基础能力。
 
-### 3. 内存资源由运行时管理
+### 4. 打印支持 Python 式格式化
+
+`打印` 的字符串里可以直接用 `{名字}` 取当前作用域的变量，也可以写任意表达式：
+
+```light
+名字 = "LightLang"
+版本 = 2
+打印("你好，{名字}！当前版本 {版本}")
+打印("下个版本是 {版本 + 1}")
+打印(f"f 前缀写法：{名字}")
+```
+
+也可以像 `printf` 一样显式传参，用 `{}` 按顺序填充，或用 `{0}`、`{1}` 指定位置：
+
+```light
+打印("{} 和 {}", "甲", "乙")
+打印("{1} 在 {0} 前面", "甲", "乙")
+打印("{0} 与 {0}", 7)
+```
+
+| 写法 | 说明 |
+| --- | --- |
+| `{名字}` | 取当前作用域的变量 |
+| `{表达式}` | 求值后插入，支持 `+ - * /`、函数调用、方法调用等 |
+| `{}` | 按顺序填入第一个未使用的位置参数 |
+| `{0}` `{1}` | 按下标填入位置参数，可重复使用 |
+| `{{` `}}` | 输出字面量 `{` 与 `}` |
+
+补充说明：
+
+- 位置参数只在第一个参数是字符串字面量时生效；`打印(3, 4)` 仍按原语义打印元组 `(3, 4)`。
+- 占位符里的名字在编译期检查，写错会立即报错并指出未定义的变量。
+- 格式化同样适用于交互模式、`页面` 块和 `lightWeb` 输出。
+
+### 5. 内存资源由运行时管理
 
 LightLang 配套的 `lightrt` 使用 Rust 实现字符串、数组和字典等运行时对象。编译器会跟踪拥有堆资源的变量，并在适当位置插入释放操作。
 
 这让 LightLang 在保持脚本体验的同时，也能拥有可靠的资源管理基础。
 
-### 4. Light 模块与 Rust FFI 互通
+### 6. Light 模块与 Rust FFI 互通
 
 普通 Light 模块可以直接导入：
 
@@ -90,7 +168,7 @@ LightLang 配套的 `lightrt` 使用 Rust 实现字符串、数组和字典等�
 
 Rust 能力通过带有 `extern "C"` 接口的静态库接入。当前 `lightGo.toml` 可以声明 FFI 模块，Cargo 会自动构建对应依赖。
 
-### 5. 字符串方法直接可用
+### 7. 字符串方法直接可用
 
 字符串可以使用简洁的方法式调用：
 
@@ -101,7 +179,7 @@ Rust 能力通过带有 `extern "C"` 接口的静态库接入。当前 `lightGo.
 打印(文本.替换("Light", "World"))
 ```
 
-### 6. 基础异常处理
+### 8. 基础异常处理
 
 LightLang 提供显式的抛出、捕获和最终清理结构：
 
@@ -143,8 +221,8 @@ cargo build --release
 ### 使用发行包
 
 ```bash
-tar -xzf light-lang-0.2.0-linux-x86_64.tar.gz
-cd light-lang-0.2.0
+tar -xzf light-lang-0.2.1-linux-x86_64.tar.gz
+cd light-lang-0.2.1
 ./install.sh
 ```
 
@@ -203,7 +281,7 @@ lightGo 构建
 ```toml
 [package]
 name = "demo"
-version = "0.2.0"
+version = "0.2.1"
 entry = "src/main.light"
 ```
 
@@ -238,7 +316,7 @@ Rust crate 不能直接被 Light 函数调用，因为 Rust 的 ABI、泛型和�
 ```toml
 [package]
 name = "sha2_ffi"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 
 [lib]
@@ -275,7 +353,7 @@ pub extern "C" fn light_sha256_prefix32(s: *const c_void) -> i64 {
 ```toml
 [package]
 name = "sha2_demo"
-version = "0.2.0"
+version = "0.2.1"
 entry = "src/main.light"
 
 [[ffi]]
@@ -413,6 +491,9 @@ lightgo/examples/
 ## 常用命令
 
 ```bash
+light                              进入交互模式（REPL）
+light hello.light
+light --debug hello.light
 lightc hello.light -o hello
 lightc --help
 
@@ -427,6 +508,7 @@ lightGo delete demo --yes
 
 ```text
 light-lang/
+├── light/                   Light 运行与交互（REPL）命令
 ├── lightc/                  Light 编译器
 ├── lightrt/                 Rust 运行时
 ├── lightgo/                 项目工具与示例
@@ -439,6 +521,7 @@ light-lang/
 
 ### 核心组件
 
+- **light** - 运行与交互命令：临时编译并直接运行 Light 源码，或进入保留变量的交互模式
 - **lightc** - 编译器，包含词法分析、语法解析、类型推导和 LLVM 代码生成
 - **lightrt** - Rust 运行时，提供字符串、数组、字典等核心数据类型及数学、文件、系统函数
 - **lightgo** - 项目构建工具，支持项目管理、依赖构建和 Cargo 风格选项
@@ -456,8 +539,11 @@ LightLang 目前仍处于早期开发阶段，以下能力正在逐步完善：
 - 更完整的包管理、依赖缓存和发布流程
 - 更完整的 Web 路由、模板和静态文件支持
 - 基于 Light 的简单配置文件格式
+- 交互模式的增量编译：当前每输入一句都会重新编译整段会话，会话很大时响应会变慢
 
 目前发行包主要面向 Linux x86_64，其他平台需要根据系统工具链单独构建。
+
+CI（`.gitcode/workflows/ci.yml`）会构建 Linux x86_64（glibc 与 musl 静态）、Linux aarch64/armv7、Windows MSVC 与 MinGW（x64）以及 Windows ARM64 的产物；Windows 与 ARM 目前只提供构建产物，尚未提供安装包。
 
 ## 路线图
 
@@ -486,6 +572,17 @@ LightLang 目前仍处于早期开发阶段，以下能力正在逐步完善：
 cargo check --release
 cargo build --release
 ```
+
+持续集成配置在 `.gitcode/workflows/ci.yml`（`.gitcode/workflow/ci.yml` 为同内容副本），
+覆盖 Linux x86_64、Linux aarch64/armv7、Windows MSVC、MinGW 与 Windows ARM64：
+
+| 任务 | 内容 |
+| --- | --- |
+| `linux-elf` | x86_64 glibc 与 musl 静态构建、冒烟测试、打包发行版 |
+| `linux-arm` | aarch64（glibc/musl）与 armv7 交叉编译 |
+| `windows-msvc` | x64 MSVC 构建、版本自检、编译并运行 Light 程序 |
+| `windows-mingw` | x64 MinGW 构建与版本自检 |
+| `windows-arm64` | ARM64 MSVC 交叉编译 |
 
 如果希望参与语言设计，请优先说明：
 
