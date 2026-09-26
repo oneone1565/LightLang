@@ -8,4 +8,6 @@
 页面 (标题="hello" 图标=none):
     语言="zh-cn"
     主题="dark"
+    CSS = "h1 { color: #ff6b35; }"
     打印 "<h1>hello</h1>"
+    样式 "h1 { letter-spacing: 2px; }"

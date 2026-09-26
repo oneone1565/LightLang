@@ -76,6 +76,7 @@ pub struct CodeGen<'a> {
     loops: Vec<LoopCtx>,
     deferred: Vec<String>,
     page_mode: bool,
+    debug_assertions: bool,
     target_triple: String,
 }
 
@@ -101,6 +102,7 @@ const RUNTIME_DECLS: &[&str] = &[
     "declare void @light_page_reset(ptr, i64, ptr, i64)",
     "declare void @light_page_set_lang(ptr, i64)",
     "declare void @light_page_set_theme(ptr, i64)",
+    "declare void @light_page_append_style(ptr, i64)",
     "declare void @light_page_append_str(ptr, i64)",
     "declare void @light_page_append_int(i64)",
     "declare void @light_page_append_float(double)",
@@ -180,7 +182,7 @@ const RUNTIME_DECLS: &[&str] = &[
 ];
 
 impl<'a> CodeGen<'a> {
-    pub fn new(env: &'a typeinfer::TypeEnv, target_triple: String) -> Self {
+    pub fn new(env: &'a typeinfer::TypeEnv, target_triple: String, debug_assertions: bool) -> Self {
         CodeGen {
             out: String::new(),
             tmp: 0,
@@ -191,6 +193,7 @@ impl<'a> CodeGen<'a> {
             loops: Vec::new(),
             deferred: Vec::new(),
             page_mode: false,
+            debug_assertions,
             target_triple,
         }
     }
@@ -629,6 +632,35 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         Ok(())
     }
 
+    fn gen_assert(&mut self, condition: &Expr, message: Option<&Expr>, scopes: &mut Vec<Scope>) -> Result<(), String> {
+        if !self.debug_assertions {
+            return Ok(());
+        }
+        let (value, ty) = self.gen_expr(condition, scopes)?;
+        let test = self.gen_to_i1(&value, ty);
+        let ok = self.fresh_label("assertok");
+        let fail = self.fresh_label("assertfail");
+        self.emit(&format!("  br i1 {}, label %{}, label %{}", test, ok, fail));
+        self.emit(&format!("{}:", fail));
+        let text = match message {
+            Some(Expr::Str(text)) => text.as_str(),
+            Some(_) => return Err("断言消息必须是字符串".into()),
+            None => "断言失败",
+        };
+        let (gep, len) = self.emit_str_const(text);
+        let sp = self.fresh();
+        self.emit(&format!("  {} = call ptr @light_str_from_utf8(ptr {}, i64 {})", sp, gep, len));
+        let raw = self.fresh();
+        self.emit(&format!("  {} = call ptr @light_str_ptr(ptr {})", raw, sp));
+        self.emit(&format!("  call void @light_print_str(ptr {}, i64 {})", raw, len));
+        self.emit("  call void @light_print_newline()");
+        self.emit(&format!("  call void @light_str_free(ptr {})", sp));
+        self.emit("  call void @light_sys_exit(i64 1)");
+        self.emit("  unreachable");
+        self.emit(&format!("{}:", ok));
+        Ok(())
+    }
+
     fn gen_page_print(&mut self, expr: &Expr, scopes: &mut Vec<Scope>) -> Result<(), String> {
         let (reg, ty) = self.gen_expr(expr, scopes)?;
         match ty {
@@ -652,14 +684,14 @@ fn cleanup_scope(&mut self, scope: &Scope) {
     }
 
     fn gen_page_setting(&mut self, name: &str, value: &Expr, scopes: &mut Vec<Scope>) -> Result<bool, String> {
-        if !self.page_mode || !matches!(name, "语言" | "主题") {
+        if !self.page_mode || !matches!(name, "语言" | "主题" | "CSS" | "样式") {
             return Ok(false);
         }
         let (reg, data, len) = self.gen_string_parts(value, scopes)?;
-        let function = if name == "语言" {
-            "light_page_set_lang"
-        } else {
-            "light_page_set_theme"
+        let function = match name {
+            "语言" => "light_page_set_lang",
+            "主题" => "light_page_set_theme",
+            _ => "light_page_append_style",
         };
         self.emit(&format!("  call void @{}(ptr {}, i64 {})", function, data, len));
         if !matches!(value, Expr::Ident(_)) {
@@ -811,6 +843,14 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             Stmt::Expr(e) => {
                 let _ = self.gen_expr(e, scopes)?;
             }
+            Stmt::Style(expr) if self.page_mode => {
+                let (reg, data, len) = self.gen_string_parts(expr, scopes)?;
+                self.emit(&format!("  call void @light_page_append_style(ptr {}, i64 {})", data, len));
+                if !matches!(expr, Expr::Ident(_)) {
+                    self.free_value(&reg, &Ty::Str);
+                }
+            }
+            Stmt::Style(_) => return Err("样式只能写在页面代码块中".into()),
             Stmt::Print(e) if self.page_mode => {
                 self.gen_page_print(e, scopes)?;
             }
@@ -878,6 +918,9 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             }
             Stmt::Thread { id, body } => {
                 self.gen_thread(*id, body)?;
+            }
+            Stmt::Assert { condition, message } => {
+                self.gen_assert(condition, message.as_ref(), scopes)?;
             }
             Stmt::Page { title, icon, body } => {
                 self.gen_page(title, icon, body)?;

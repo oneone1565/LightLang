@@ -38,6 +38,7 @@ struct PageState {
     icon: String,
     lang: String,
     theme: String,
+    styles: Vec<u8>,
     content: Vec<u8>,
 }
 
@@ -47,6 +48,7 @@ thread_local! {
         icon: String::new(),
         lang: String::from("zh-cn"),
         theme: String::from("light"),
+        styles: Vec::new(),
         content: Vec::new(),
     });
 }
@@ -65,6 +67,10 @@ fn string_from_ptr(ptr: *const u8, len: i64) -> String {
         return String::new();
     }
     String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(ptr, len as usize) }).to_string()
+}
+
+fn page_append_style(value: &str) {
+    PAGE.with(|page| page.borrow_mut().styles.extend_from_slice(value.as_bytes()));
 }
 
 fn page_append_str(value: &str) {
@@ -167,6 +173,7 @@ pub unsafe extern "C" fn light_page_reset(
             icon,
             lang: String::from("zh-cn"),
             theme: String::from("light"),
+            styles: Vec::new(),
             content: Vec::new(),
         };
     });
@@ -182,6 +189,11 @@ pub unsafe extern "C" fn light_page_set_lang(ptr: *const u8, len: i64) {
 pub unsafe extern "C" fn light_page_set_theme(ptr: *const u8, len: i64) {
     let value = string_from_ptr(ptr, len);
     PAGE.with(|page| page.borrow_mut().theme = value);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn light_page_append_style(ptr: *const u8, len: i64) {
+    page_append_style(&string_from_ptr(ptr, len));
 }
 
 #[no_mangle]
@@ -212,6 +224,7 @@ pub unsafe extern "C" fn light_page_finish() -> *mut c_void {
         let lang = html_escape(&page.lang);
         let icon = html_escape(&page.icon);
         let content = String::from_utf8_lossy(&page.content).to_string();
+        let styles = String::from_utf8_lossy(&page.styles).to_string();
         let (background, foreground) = if page.theme == "dark" {
             ("#101418", "#e6edf3")
         } else {
@@ -223,9 +236,10 @@ pub unsafe extern "C" fn light_page_finish() -> *mut c_void {
             format!("<link rel=\"icon\" href=\"{}\">\n", icon)
         };
         let html = format!(
-            "<!doctype html>\n<html lang=\"{lang}\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>{title}</title>\n{icon_link}<style>\nbody {{ margin: 0; padding: 2rem; background: {background}; color: {foreground}; font-family: system-ui, sans-serif; }}\n</style>\n</head>\n<body>\n{content}\n</body>\n</html>\n"
+            "<!doctype html>\n<html lang=\"{lang}\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>{title}</title>\n{icon_link}<style>\nbody {{ margin: 0; padding: 2rem; background: {background}; color: {foreground}; font-family: system-ui, sans-serif; }}\n{styles}\n</style>\n</head>\n<body>\n{content}\n</body>\n</html>\n"
         );
         page.content.clear();
+        page.styles.clear();
         make_string(html.as_bytes()) as *mut c_void
     })
 }

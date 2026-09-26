@@ -37,6 +37,8 @@ pub enum Stmt {
     Assign { target: Expr, value: Expr },
     Expr(Expr),
     Print(Expr),
+    Style(Expr),
+    Assert { condition: Expr, message: Option<Expr> },
     Throw(Expr),
     Thread { id: i64, body: Block },
     Page { title: String, icon: String, body: Block },

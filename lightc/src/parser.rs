@@ -181,6 +181,30 @@ impl Parser {
                 self.consume_line_end()?;
                 Ok(Stmt::Let { name, value })
             }
+            TokenKind::Ident(name) if name == "样式" || name == "CSS" => {
+                self.bump();
+                if matches!(self.peek_kind(), TokenKind::Assign) {
+                    self.bump();
+                    let value = self.parse_expr()?;
+                    self.consume_line_end()?;
+                    return Ok(Stmt::Assign { target: Expr::Ident(name), value });
+                }
+                let value = self.parse_expr()?;
+                self.consume_line_end()?;
+                Ok(Stmt::Style(value))
+            }
+            TokenKind::Assert => {
+                self.bump();
+                let condition = self.parse_expr()?;
+                let message = if matches!(self.peek_kind(), TokenKind::Comma) {
+                    self.bump();
+                    Some(self.parse_expr()?)
+                } else {
+                    None
+                };
+                self.consume_line_end()?;
+                Ok(Stmt::Assert { condition, message })
+            }
             TokenKind::Print => {
                 self.bump();
                 let value = self.parse_expr()?;

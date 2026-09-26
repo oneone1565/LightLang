@@ -353,6 +353,9 @@ fn build_project(manifest_path: &Path, options: &BuildOptions) -> Result<PathBuf
     if !link_runtime {
         command.arg("--no-lightrt");
     }
+    if profile == "debug" {
+        command.arg("--debug");
+    }
     command.arg(&entry).arg("-o").arg(&output);
     for (name, library) in native_libs {
         command.arg("--native").arg(format!("{}={}", name, library.display()));

@@ -31,6 +31,7 @@ fn main() {
     let mut emit_asm = false;
     let mut no_link = false;
     let mut no_lightrt = false;
+    let mut debug_assertions = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -61,6 +62,7 @@ fn main() {
             "--emit-asm" => emit_asm = true,
             "--no-link" => no_link = true,
             "--no-lightrt" => no_lightrt = true,
+            "--debug" => debug_assertions = true,
             s if !s.starts_with('-') => input = Some(s.to_string()),
             other => {
                 eprintln!("未知参数：{}", other);
@@ -102,7 +104,7 @@ fn main() {
     let clang = find_clang();
     let target_triple = detect_target_triple(&clang);
 
-    let mut cg = codegen::CodeGen::new(&env, target_triple);
+    let mut cg = codegen::CodeGen::new(&env, target_triple, debug_assertions);
     let ir = match cg.gen(&program) {
         Ok(ir) => ir,
         Err(e) => {
