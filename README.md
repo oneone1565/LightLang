@@ -143,8 +143,8 @@ cargo build --release
 ### 使用发行包
 
 ```bash
-tar -xzf light-lang-0.1.0-linux-x86_64.tar.gz
-cd light-lang-0.1.0
+tar -xzf light-lang-0.2.0-linux-x86_64.tar.gz
+cd light-lang-0.2.0
 ./install.sh
 ```
 
@@ -203,7 +203,7 @@ lightGo 构建
 ```toml
 [package]
 name = "demo"
-version = "0.1.0"
+version = "0.2.0"
 entry = "src/main.light"
 ```
 
@@ -238,7 +238,7 @@ Rust crate 不能直接被 Light 函数调用，因为 Rust 的 ABI、泛型和�
 ```toml
 [package]
 name = "sha2_ffi"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [lib]
@@ -275,7 +275,7 @@ pub extern "C" fn light_sha256_prefix32(s: *const c_void) -> i64 {
 ```toml
 [package]
 name = "sha2_demo"
-version = "0.1.0"
+version = "0.2.0"
 entry = "src/main.light"
 
 [[ffi]]

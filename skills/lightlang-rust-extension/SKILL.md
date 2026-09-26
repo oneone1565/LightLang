@@ -40,7 +40,7 @@ my-extension/
 ```toml
 [package]
 name = "my_extension"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [lib]
@@ -57,7 +57,7 @@ lightrt = { path = "../../lightrt" }
 ```toml
 [package]
 name = "demo"
-version = "0.1.0"
+version = "0.2.0"
 entry = "src/main.light"
 
 [[ffi]]

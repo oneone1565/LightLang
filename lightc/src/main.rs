@@ -19,6 +19,10 @@ use std::process::Command;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
+    if args.len() == 2 && matches!(args[1].as_str(), "--version" | "-V") {
+        println!("lightc {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     if args.len() < 2 {
         eprintln!("用法：lightc <输入.light> [-o 输出] [--native 名称=静态库路径] [--no-lightrt] [--emit-llvm] [--emit-asm] [--no-link]");
         std::process::exit(1);

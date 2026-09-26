@@ -54,6 +54,10 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let mut args: Vec<String> = env::args().skip(1).collect();
+    if args.len() == 1 && matches!(args[0].as_str(), "--version" | "-V") {
+        println!("lightGo {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
         print_help();
         return Ok(());
@@ -458,7 +462,7 @@ fn create_project(args: &[String]) -> Result<(), String> {
     fs::create_dir_all(root.join("src"))
         .map_err(|e| format!("创建项目失败：{}", e))?;
     let manifest = format!(
-        "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nentry = \"src/main.light\"\n",
+        "[package]\nname = \"{}\"\nversion = \"0.2.0\"\nentry = \"src/main.light\"\n",
         package_name
     );
     fs::write(root.join("lightGo.toml"), manifest)

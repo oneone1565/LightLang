@@ -44,11 +44,11 @@ dependencies = [
 
 [[package]]
 name = "lightc"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "lightgo"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "toml",
@@ -56,11 +56,11 @@ dependencies = [
 
 [[package]]
 name = "lightrt"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "lightweb"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "lightrt",
  "tiny_http",
