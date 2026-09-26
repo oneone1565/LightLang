@@ -543,7 +543,7 @@ LightLang 目前仍处于早期开发阶段，以下能力正在逐步完善：
 
 目前发行包主要面向 Linux x86_64，其他平台需要根据系统工具链单独构建。
 
-CI（`.gitcode/workflows/ci.yml`）会构建 Linux x86_64（glibc 与 musl 静态）、Linux aarch64/armv7、Windows MSVC 与 MinGW（x64）以及 Windows ARM64 的产物；Windows 与 ARM 目前只提供构建产物，尚未提供安装包。
+CI（`.gitcode/workflow/ci.yml`）会构建 Linux x86_64（glibc 与 musl 静态）、Linux aarch64/armv7、Windows MSVC 与 MinGW（x64）以及 Windows ARM64 的产物；Windows 与 ARM 目前只提供构建产物，尚未提供安装包。
 
 ## 路线图
 
@@ -573,8 +573,7 @@ cargo check --release
 cargo build --release
 ```
 
-持续集成配置在 `.gitcode/workflows/ci.yml`（`.gitcode/workflow/ci.yml` 为同内容副本），
-覆盖 Linux x86_64、Linux aarch64/armv7、Windows MSVC、MinGW 与 Windows ARM64：
+持续集成配置在 `.gitcode/workflow/ci.yml`，覆盖 Linux x86_64、Linux aarch64/armv7、Windows MSVC、MinGW 与 Windows ARM64：
 
 | 任务 | 内容 |
 | --- | --- |
