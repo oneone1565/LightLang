@@ -65,7 +65,7 @@ jobs:
               || { echo "$crate 版本号不是 $LIGHT_VERSION"; exit 1; }
           done
 
-      - name: 冒烟测试：运行示例
+      - name: 冒烟测试-运行示例
         run: |
           set -euo pipefail
           export PATH="$PWD/target/release:$PATH"
@@ -75,7 +75,7 @@ jobs:
           light examples/string_methods.light
           light examples/assert.light
 
-      - name: 冒烟测试：打印格式化
+      - name: 冒烟测试-打印格式化
         run: |
           set -euo pipefail
           export PATH="$PWD/target/release:$PATH"
@@ -92,13 +92,13 @@ jobs:
           LIGHT
           light "$work/demo.light"
 
-      - name: 冒烟测试：交互模式
+      - name: 冒烟测试-交互模式
         run: |
           set -euo pipefail
           export PATH="$PWD/target/release:$PATH"
           printf 'a = 6\n打印("a={a}")\n函数 平方(n):\n    返回 n * n\n\n打印("平方 {平方(7)}")\n' | light
 
-      - name: 冒烟测试：项目工具
+      - name: 冒烟测试-项目工具
         run: |
           set -euo pipefail
           export PATH="$PWD/target/release:$PATH"
@@ -126,7 +126,7 @@ jobs:
           (cd dist && sha256sum *.tar.gz | tee dist/sha256sum.txt)
 
       - name: 上传 Linux x86_64 构建物
-        uses: actions/upload-artifact@v4
+        uses: upload-artifact
         with:
           name: light-lang-linux-x86_64
           path: |
@@ -187,7 +187,7 @@ jobs:
             || { echo "aarch64 musl 版应为静态链接"; exit 1; }
 
       - name: 上传 Linux ARM 构建物
-        uses: actions/upload-artifact@v4
+        uses: upload-artifact
         with:
           name: light-lang-linux-arm
           path: |
@@ -203,109 +203,39 @@ jobs:
             target/armv7-unknown-linux-gnueabihf/release/lightGo
 
   # =====================================================================
-  # Windows x64：MSVC 工具链（可执行冒烟测试）
-  # =====================================================================
-  windows-msvc:
-    name: Windows MSVC x64
-    runs-on: windows-latest
-    steps:
-      - name: 检出代码
-        uses: checkout
-
-      - name: 添加目标
-        run: rustup target add x86_64-pc-windows-msvc
-
-      - name: 编译 release
-        run: cargo build --release --target x86_64-pc-windows-msvc
-
-      - name: 校验产物为 PE
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          foreach ($bin in @("light", "lightc", "lightGo")) {
-            $path = "target/x86_64-pc-windows-msvc/release/$bin.exe"
-            if (-not (Test-Path $path)) { throw "$path 不存在" }
-            Write-Host "$bin => $((Get-Item $path).Length) 字节"
-          }
-
-      - name: 版本自检
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $dir = "target/x86_64-pc-windows-msvc/release"
-          & "$dir/lightc.exe" --version
-          & "$dir/light.exe" --version
-          & "$dir/lightGo.exe" --version
-
-      - name: 冒烟测试：编译并运行 Light 程序
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $dir = "target/x86_64-pc-windows-msvc/release"
-          $work = Join-Path $env:RUNNER_TEMP "lightdemo"
-          New-Item -ItemType Directory -Force -Path $work | Out-Null
-          @"
-          名字 = "LightLang"
-          打印("你好，{名字}！")
-          打印("2 + 3 = {2 + 3}")
-          "@ | Set-Content -Path (Join-Path $work "demo.light") -Encoding UTF8
-          & "$dir/lightc.exe" (Join-Path $work "demo.light") -o (Join-Path $work "demo.exe")
-          & (Join-Path $work "demo.exe")
-
-      - name: 上传 Windows MSVC 构建物
-        uses: actions/upload-artifact@v4
-        with:
-          name: light-lang-windows-msvc
-          path: |
-            target/x86_64-pc-windows-msvc/release/light.exe
-            target/x86_64-pc-windows-msvc/release/lightc.exe
-            target/x86_64-pc-windows-msvc/release/lightGo.exe
-            target/x86_64-pc-windows-msvc/release/lightrt.lib
-
-  # =====================================================================
-  # Windows x64：MinGW（GNU）工具链
+  # Windows x64 MinGW（GNU）：在 Linux 托管 Runner 上交叉编译
+  # 平台暂不提供 Windows 托管 Runner，故在 ubuntu-latest 上交叉编译
   # =====================================================================
   windows-mingw:
     name: Windows MinGW x64
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     steps:
       - name: 检出代码
         uses: checkout
 
-      - name: 安装 MinGW
-        shell: pwsh
+      - name: 安装 MinGW 交叉工具链
         run: |
-          choco install mingw -y --no-progress
-          echo "C:\ProgramData\mingw64\mingw64\bin" >> $env:GITHUB_PATH
-          echo "C:\ProgramData\mingw64\mingw64\bin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64 file
+          rustup target add x86_64-pc-windows-gnu
 
-      - name: 添加 GNU 目标
-        run: rustup target add x86_64-pc-windows-gnu
-
-      - name: 编译 release
+      - name: 编译 release（MinGW 交叉编译）
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
         run: cargo build --release --target x86_64-pc-windows-gnu
 
       - name: 校验产物为 PE
-        shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
-          foreach ($bin in @("light", "lightc", "lightGo")) {
-            $path = "target/x86_64-pc-windows-gnu/release/$bin.exe"
-            if (-not (Test-Path $path)) { throw "$path 不存在" }
-          }
-          gcc --version | Select-Object -First 1
-
-      - name: 版本自检
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $dir = "target/x86_64-pc-windows-gnu/release"
-          & "$dir/lightc.exe" --version
-          & "$dir/light.exe" --version
-          & "$dir/lightGo.exe" --version
+          set -euo pipefail
+          for bin in light lightc lightGo; do
+            path="target/x86_64-pc-windows-gnu/release/$bin.exe"
+            test -f "$path" || { echo "$path 不存在"; exit 1; }
+            file "$path" | grep -q "PE32" || { echo "$path 不是 PE"; exit 1; }
+            echo "$bin => $(file -b "$path" | cut -d, -f1-2)"
+          done
 
       - name: 上传 Windows MinGW 构建物
-        uses: actions/upload-artifact@v4
+        uses: upload-artifact
         with:
           name: light-lang-windows-mingw
           path: |
@@ -313,38 +243,3 @@ jobs:
             target/x86_64-pc-windows-gnu/release/lightc.exe
             target/x86_64-pc-windows-gnu/release/lightGo.exe
             target/x86_64-pc-windows-gnu/release/liblightrt.a
-
-  # =====================================================================
-  # Windows ARM64：MSVC 交叉编译（仅构建，x64 机器无法运行）
-  # =====================================================================
-  windows-arm64:
-    name: Windows ARM64
-    runs-on: windows-latest
-    steps:
-      - name: 检出代码
-        uses: checkout
-
-      - name: 添加 ARM64 目标
-        run: rustup target add aarch64-pc-windows-msvc
-
-      - name: 编译 release
-        run: cargo build --release --target aarch64-pc-windows-msvc
-
-      - name: 校验产物为 PE
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          foreach ($bin in @("light", "lightc", "lightGo")) {
-            $path = "target/aarch64-pc-windows-msvc/release/$bin.exe"
-            if (-not (Test-Path $path)) { throw "$path 不存在" }
-          }
-
-      - name: 上传 Windows ARM64 构建物
-        uses: actions/upload-artifact@v4
-        with:
-          name: light-lang-windows-arm64
-          path: |
-            target/aarch64-pc-windows-msvc/release/light.exe
-            target/aarch64-pc-windows-msvc/release/lightc.exe
-            target/aarch64-pc-windows-msvc/release/lightGo.exe
-            target/aarch64-pc-windows-msvc/release/lightrt.lib
