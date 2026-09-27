@@ -5,6 +5,9 @@ on:
     branches:
       - main
       - master
+    tags:
+      - "v*"
+      - "[0-9]+.[0-9]+.[0-9]+"
   pull_request:
   workflow_dispatch:
 
@@ -249,3 +252,70 @@ jobs:
             target/x86_64-pc-windows-gnu/release/lightc.exe
             target/x86_64-pc-windows-gnu/release/lightGo.exe
             target/x86_64-pc-windows-gnu/release/liblightrt.a
+
+  # =====================================================================
+  # 发布：打 tag（v* 或 0.2.1 格式）时自动把三个平台的产物上传到 Release
+  # =====================================================================
+  release:
+    name: 发布到 Release
+    runs-on: ubuntu-latest
+    needs:
+      - linux-elf
+      - linux-arm
+      - windows-mingw
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: 下载全部构建物
+        uses: download-artifact
+        with:
+          path: artifacts
+
+      - name: 整理发布文件
+        run: |
+          set -euo pipefail
+          mkdir -p release-files
+          # Linux x86_64 发行版 tar.gz + sha256
+          cp artifacts/light-lang-linux-x86_64/*.tar.gz release-files/
+          cp artifacts/light-lang-linux-x86_64/sha256sum.txt release-files/sha256sum-linux-x86_64.txt
+          # Linux ARM 二进制
+          arm="artifacts/light-lang-linux-arm"
+          for bin in light lightc lightGo; do
+            cp "$arm/aarch64-unknown-linux-gnu/release/$bin" "release-files/$bin-$LIGHT_VERSION-linux-aarch64"
+            cp "$arm/aarch64-unknown-linux-musl/release/$bin" "release-files/$bin-$LIGHT_VERSION-linux-aarch64-musl"
+            cp "$arm/armv7-unknown-linux-gnueabihf/release/$bin" "release-files/$bin-$LIGHT_VERSION-linux-armv7"
+          done
+          cp "$arm/aarch64-unknown-linux-gnu/release/liblightrt.a" "release-files/liblightrt-$LIGHT_VERSION-linux-aarch64.a"
+          # Windows MinGW exe
+          win="artifacts/light-lang-windows-mingw"
+          for bin in light lightc lightGo; do
+            cp "$win/x86_64-pc-windows-gnu/release/$bin.exe" "release-files/$bin-$LIGHT_VERSION-windows-x86_64.exe"
+          done
+          cp "$win/x86_64-pc-windows-gnu/release/liblightrt.a" "release-files/liblightrt-$LIGHT_VERSION-windows-x86_64.a"
+          ls -la release-files/
+
+      - name: 生成 sha256 校验和
+        run: |
+          set -euo pipefail
+          cd release-files
+          sha256sum * | tee sha256sum.txt
+
+      - name: 创建 Release 并上传产物
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/}"
+          body="LightLang $tag 自动发布（由 CI 生成）。
+
+          包含：
+          - Linux x86_64 发行版 tar.gz（含 install.sh、examples、skills）
+          - Linux ARM（aarch64 glibc/musl 静态、armv7）二进制
+          - Windows MinGW x64 exe
+          - sha256sum.txt 校验和
+
+          使用方法：下载 tar.gz 解压后运行 \`install.sh\`。"
+          notes="$(mktemp)"
+          printf '%s\n' "$body" > "$notes"
+          ag release create "NomiLight2026/lightLang" "$tag" \
+            --name "$tag" --body-file "$notes"
+          for f in release-files/*; do
+            ag release upload "NomiLight2026/lightLang" "$tag" "$f"
+          done
