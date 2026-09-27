@@ -130,12 +130,37 @@ jobs:
           (cd dist && tar -czf "light-lang-$LIGHT_VERSION-linux-x86_64.tar.gz" "light-lang-$LIGHT_VERSION")
           (cd dist && sha256sum *.tar.gz | tee dist/sha256sum.txt)
 
+      - name: 构建自解压安装包
+        run: |
+          set -euo pipefail
+          # payload = 已打包的发行版 tar.gz，追加在 stub 二进制末尾
+          payload="dist/light-lang-$LIGHT_VERSION-linux-x86_64.tar.gz"
+          psize=$(stat -c%s "$payload")
+          sfx="dist/light-lang-$LIGHT_VERSION-linux-x86_64-installer"
+          # 第一遍编译：确定 stub 大小，作为 payload 偏移
+          gcc -O2 -DSFX_NAME='"light-lang-installer"' -DSFX_VERSION="\"$LIGHT_VERSION\"" \
+            -DSFX_DATA_OFFSET=0 -DSFX_DATA_SIZE="$psize" \
+            -DSFX_TOP_DIR="\"light-lang-$LIGHT_VERSION\"" \
+            scripts/sfx.c -o /tmp/sfx_pre -lz
+          offset=$(stat -c%s /tmp/sfx_pre)
+          # 第二遍编译：写入真实偏移，追加 payload
+          gcc -O2 -DSFX_NAME='"light-lang-installer"' -DSFX_VERSION="\"$LIGHT_VERSION\"" \
+            -DSFX_DATA_OFFSET="$offset" -DSFX_DATA_SIZE="$psize" \
+            -DSFX_TOP_DIR="\"light-lang-$LIGHT_VERSION\"" \
+            scripts/sfx.c -o "$sfx" -lz
+          cat "$payload" >> "$sfx"
+          chmod +x "$sfx"
+          # 冒烟验证：--help 能跑通
+          file "$sfx" | grep -q "ELF 64-bit"
+          "$sfx" --help
+
       - name: 上传 Linux x86_64 构建物
         uses: upload-artifact
         with:
           name: light-lang-linux-x86_64
           path: |
             dist/*.tar.gz
+            dist/*installer
             dist/sha256sum.txt
             target/release/light
             target/release/lightc
@@ -274,8 +299,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-files
-          # Linux x86_64 发行版 tar.gz + sha256
+          # Linux x86_64 发行版 tar.gz + 自解压安装包 + sha256
           cp artifacts/light-lang-linux-x86_64/*.tar.gz release-files/
+          cp artifacts/light-lang-linux-x86_64/*installer release-files/
           cp artifacts/light-lang-linux-x86_64/sha256sum.txt release-files/sha256sum-linux-x86_64.txt
           # Linux ARM 二进制
           arm="artifacts/light-lang-linux-arm"
