@@ -22,10 +22,12 @@ jobs:
       - name: 检出代码
         uses: checkout
 
-      - name: 安装 Clang 与交叉工具链
+      - name: 安装 Rust 与交叉工具链
         run: |
           sudo apt-get update
           sudo apt-get install -y clang gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf file
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> $ATOMGIT_PATH
           rustup target add x86_64-unknown-linux-musl
 
       - name: 编译 release（glibc）
@@ -150,10 +152,12 @@ jobs:
       - name: 检出代码
         uses: checkout
 
-      - name: 安装交叉工具链
+      - name: 安装 Rust 与交叉工具链
         run: |
           sudo apt-get update
           sudo apt-get install -y clang gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf file
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> $ATOMGIT_PATH
           rustup target add aarch64-unknown-linux-gnu aarch64-unknown-linux-musl armv7-unknown-linux-gnueabihf
 
       - name: 编译 aarch64（glibc）
@@ -213,10 +217,12 @@ jobs:
       - name: 检出代码
         uses: checkout
 
-      - name: 安装 MinGW 交叉工具链
+      - name: 安装 Rust 与 MinGW 交叉工具链
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-mingw-w64-x86-64 file
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> $ATOMGIT_PATH
           rustup target add x86_64-pc-windows-gnu
 
       - name: 编译 release（MinGW 交叉编译）
