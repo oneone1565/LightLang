@@ -17,6 +17,10 @@ pub enum Item {
 pub struct FnDef {
     pub name: String,
     pub params: Vec<String>,
+    /// 参数类型标注：函数 参数: 列表 中的类型名（None 表示未标注）
+    pub param_types: Vec<Option<String>>,
+    /// 返回类型标注：函数 f() -> 字符串:
+    pub return_type: Option<String>,
     pub body: Block,
 }
 
@@ -24,6 +28,10 @@ pub struct FnDef {
 pub struct ExternDecl {
     pub name: String,
     pub params: Vec<String>,
+    /// 每个形参的类型标注；None 表示动态（运行期靠标签分派）
+    pub param_types: Vec<Option<String>>,
+    /// 返回类型标注；None 表示动态
+    pub return_type: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +48,15 @@ pub enum Stmt {
     /// 支持 `打印("hi,{名字}")`（按作用域取值）与 `打印("hi,{0}", 名字)`（显式传参）
     Print(Vec<Expr>),
     Style(Expr),
+    /// 页面元素：元素名 + 可选文本 + 属性键值对 + 可选子块（容器用）
+    Element {
+        kind: String,
+        text: Option<Expr>,
+        attrs: Vec<(String, Expr)>,
+        body: Option<Block>,
+    },
+    /// 结束最近的页面容器
+    ElementEnd,
     Assert { condition: Expr, message: Option<Expr> },
     Throw(Expr),
     Thread { id: i64, body: Block },

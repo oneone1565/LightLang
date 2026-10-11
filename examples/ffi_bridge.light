@@ -1,0 +1,26 @@
+# Rust FFI：类型安全桥接层
+#
+#   nlightc examples/ffi_bridge.light -o /tmp/ffi_bridge && /tmp/ffi_bridge
+#
+# 桥接层（LightStr / LightArray / LightDyn）由 nlightc 自动内联进
+# ffi_bridge.rs，原生侧不用写 extern 声明、不用加 Cargo 依赖。
+
+导入 "ffi_native"
+外部 greet(name: 字符串) -> 字符串
+外部 sum_list(list: 列表) -> 字符串
+外部 describe(v: 任意) -> 字符串
+外部 make_list(n: 整数) -> 字符串
+
+函数 main():
+    打印(greet("Light"))
+
+    打印(sum_list([1, 2, 3, 4, 5]))
+
+    打印(describe(42))
+    打印(describe("文本"))
+    打印(describe(真))
+    打印(describe([1, 2, 3]))
+    打印(describe({1: "一", 2: "二"}))
+
+    打印(make_list(6))
+    返回 0
