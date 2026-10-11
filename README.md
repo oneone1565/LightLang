@@ -4,7 +4,7 @@
 
 **让中文编程更自然，让 Rust 能力触手可及。**
 
-一个正在成长中的中文编程语言、独立编译器和 `lightGo` 项目工具。
+一个正在成长中的中文编程语言、独立编译器和 `nlightGo` 项目工具。
 
 [快速开始](#快速开始) · [功能概览](#功能概览) · [Rust 与 GUI](#rust-与-gui) · [路线图](#路线图)
 
@@ -35,7 +35,7 @@ LightLang 想解决两个很实际的问题：
 ![许可证](https://img.shields.io/badge/license-GPL--3.0-green)
 ![阶段](https://img.shields.io/badge/status-early%20development-orange)
 ![欢迎](https://img.shields.io/badge/star%20%7C%20welcome!-ff6b35?style=for-the-badge)
-![工具](https://img.shields.io/badge/tool-lightGo-purple)
+![工具](https://img.shields.io/badge/tool-nlightGo-purple)
 
 ## 核心特点
 
@@ -48,7 +48,7 @@ LightLang 支持顶层语句。保存为 `hello.light` 后即可编译运行：
 ```
 
 ```bash
-lightc hello.light -o hello
+nlightc hello.light -o hello
 ./hello
 ```
 
@@ -214,8 +214,29 @@ cargo build --release
 构建完成后可以使用：
 
 ```bash
-./target/release/lightc
-./target/release/lightGo
+./target/release/nlightc
+./target/release/nlightGo
+```
+
+### 使用自解压安装程序
+
+发行包提供一个自解压的 Linux ELF 安装程序，双击（执行）即可完成安装：
+
+```bash
+./light-lang-0.2.1-linux-x86_64-installer
+```
+
+它会把内嵌的发行包释放到临时目录，执行其中的 `install.sh`，结束后自动清理临时文件。
+
+```bash
+# 安装到指定位置并跳过确认
+./light-lang-0.2.1-linux-x86_64-installer --prefix "$HOME/.local" -y
+
+# 只释放安装包、不执行安装
+./light-lang-0.2.1-linux-x86_64-installer --target /tmp/lightlang
+
+# 卸载
+./light-lang-0.2.1-linux-x86_64-installer --uninstall --prefix "$HOME/.local" -y
 ```
 
 ### 使用发行包
@@ -226,7 +247,7 @@ cd light-lang-0.2.1
 ./install.sh
 ```
 
-安装脚本默认安装到 `/usr/local`，会将 `lightc`、`lightGo` 加入系统路径，并安装 `lightrt` 静态库。
+安装脚本默认安装到 `/usr/local`，会将 `nlightc`、`nlightGo` 加入系统路径，并安装 `nlightrt` 静态库。
 
 自定义安装位置：
 
@@ -247,31 +268,153 @@ source "$HOME/.local/etc/profile.d/lightlang.sh"
 ./install.sh --uninstall
 ```
 
-## lightGo：用 Cargo 的思路管理 Light 项目
+### 自行构建发行包
 
-`lightGo` 是一个轻量的项目构建工具，目标是让 Light 项目也拥有清晰的清单、依赖和构建流程。
+```bash
+./scripts/package.sh
+```
+
+会依次完成 release 编译、组装发行目录、打包 `dist/light-lang-<版本>-linux-x86_64.tar.gz`、
+构建内嵌该包的自解压安装程序 `dist/light-lang-<版本>-linux-x86_64-installer`，并生成 `dist/sha256sum.txt`。
+
+## Linux ARM 支持
+
+ARM 产物用 `zig` 作为交叉链接器构建，覆盖 aarch64 与 armv7：
+
+```bash
+# 依赖
+dnf install zig                      # 交叉链接器
+cargo install cargo-zigbuild          # 可选，用于 musl 静态构建
+rustup target add aarch64-unknown-linux-gnu \
+    aarch64-unknown-linux-musl armv7-unknown-linux-gnueabihf
+
+# 构建全部 ARM 产物
+./scripts/package-arm.sh
+```
+
+| 产物 | 架构 | 链接方式 | 适用场景 |
+| --- | --- | --- | --- |
+| `light-lang-<版本>-linux-aarch64.tar.gz` / `-installer` | ARM64 | 动态 glibc | 树莓派 4/5、ARM 服务器 |
+| `light-lang-<版本>-linux-aarch64-musl.tar.gz` / `-installer` | ARM64 | 静态 musl | 拷贝即用，不依赖系统库 |
+| `light-lang-<版本>-linux-armv7.tar.gz` / `-installer` | ARMv7 | 动态 glibc | 树莓派 1/2 代等 32 位设备 |
+
+自解压安装程序的行为与 x86_64 版一致：检测已有安装、比较版本、需要时更新。
+
+#### 交叉编译 Light 程序
+
+`nlightc` 生成的 IR 带的是它自身的目标三元组，并把这个目标传给 C 编译器，
+所以在 x86_64 机器上也能编译出 ARM 程序——只要给它一个目标架构的 C 工具链：
+
+```bash
+# 用 zig 提供目标架构的 libc 与链接器
+LIGHTC_CLANG="zig cc -target aarch64-linux-musl" \
+    ./nlightc 程序.light -o 程序
+```
+
+| 环境变量 | 作用 |
+| --- | --- |
+| `LIGHTC_CLANG` | 指定 C 编译器，**可以带参数**，例如 `zig cc -target aarch64-linux-musl` |
+| `LIGHTC_CLANG_ARGS` | 追加参数，例如 `--sysroot`、`-fuse-ld=lld`、`-static` |
+| `LIGHTC_CLANG_TARGET`（可选）| 覆盖目标三元组（默认取 `nlightc` 自身的构建目标） |
+
+链接失败时 `nlightc` 会提示当前目标与本机不同，并给出对应的命令示例。
+`nlightc` 会优先使用自身目录下的 `libnlightrt.a`，因此 `target/<三元组>/release/`
+里的交叉编译产物不会误用宿主架构的运行时库。
+
+## Windows 安装
+
+Windows 版二进制由 MinGW（`x86_64-pc-windows-gnu`）交叉编译，不依赖 MSVC 运行库。
+
+### 图形安装程序（自解压 EXE）
+
+```bash
+./scripts/package-win.sh
+# 产物：dist/LightLang-0.2.1-windows-x64-setup.exe
+```
+
+双击打开图形安装界面：选择安装目录（程序目录 / 用户目录）、安装、卸载，状态实时显示。
+
+- 安装时把 `bin` 追加到系统 `PATH`（需要管理员权限，不足会自动弹 UAC 提权），并写入「程序和功能」卸载项。
+- 界面会检测已安装版本，可直接覆盖升级。
+- 命令行同样可用：
+
+```powershell
+light-setup.exe --install "C:\Program Files\LightLang"
+light-setup.exe --uninstall "C:\Program Files\LightLang"
+light-setup.exe --check
+```
+
+构建依赖：
+
+```bash
+dnf install mingw64-gcc        # Fedora 提供 MinGW-w64 交叉链接器
+rustup target add x86_64-pc-windows-gnu
+```
+
+### 图形安装包（MSI）
+
+`packaging/windows/Product.wxs` 是 WiX 工程（v4+ schema），用 WixUI 向导
+（欢迎 / 许可协议 / 安装目录 / 进度 / 完成），安装到 `%ProgramFiles%\LightLang`。
+
+```bash
+./scripts/package-msi.sh
+# 产物：dist/LightLang-0.2.1-windows-x64.msi
+```
+
+脚本会自动选工具链：
+
+| 环境 | 工具链 | 图形向导 |
+| --- | --- | --- |
+| Linux / macOS | wine + Windows .NET 运行时 + wix CLI | 无（见下） |
+| Windows | 本机 `wix`（`dotnet tool install --global wix`） | 有 |
+
+在 Windows 上构建完整图形安装包：
+
+```powershell
+wix extension add WixToolset.UI
+wix build packaging/windows/Product.wxs -arch x64 `
+    -d ProductVersion=0.2.1 `
+    -d WixUI=1 `
+    -d Shortcuts=1 `
+    -d SourceDir=<素材目录> `
+    -o dist/LightLang-0.2.1-windows-x64.msi
+```
+
+> 为什么 wine 下没有向导：WixUI 的对话框与开始菜单快捷方式都要通过
+> Windows Installer 接口写库，wine 的 `msi.dll` 支持不完整（WiX v3 会直接抛
+> Win32 异常，v4+ 会静默跳过这两张表）。所以本地产出的 MSI 是**基础安装包**：
+> 文件、目录、注册表、升级与卸载都正常，双击即可安装，但没有向导界面。
+> 想要图形向导，请在 Windows（或 Windows 虚拟机）上执行上面的命令。
+
+MSI 不会修改系统 `PATH`（写回前无法可靠读取旧值，覆盖会破坏用户环境）：
+安装后可用 EXE 安装程序（自动维护 PATH），或在「系统属性 → 环境变量」里
+手动把 `bin` 加进去。
+
+## nlightGo：用 Cargo 的思路管理 Light 项目
+
+`nlightGo` 是一个轻量的项目构建工具，目标是让 Light 项目也拥有清晰的清单、依赖和构建流程。
 
 ### 创建项目
 
 ```bash
-lightGo 新建 demo
+nlightGo 新建 demo
 cd demo
-lightGo 运行
+nlightGo 运行
 ```
 
 也可以使用英文命令：
 
 ```bash
-lightGo new demo
+nlightGo new demo
 cd demo
-lightGo run
+nlightGo run
 ```
 
-`lightGo` 会自动从当前目录逐级向上寻找 `lightGo.toml`，因此在项目子目录中也可以直接运行：
+`nlightGo` 会自动从当前目录逐级向上寻找 `lightGo.toml`，因此在项目子目录中也可以直接运行：
 
 ```bash
 cd src
-lightGo 构建
+nlightGo 构建
 ```
 
 ### lightGo.toml
@@ -288,13 +431,13 @@ entry = "src/main.light"
 ### 常用 Cargo 风格选项
 
 ```bash
-lightGo 构建 --release
-lightGo 构建 --debug
-lightGo 构建 --offline --locked
-lightGo 构建 --target-dir ./build
-lightGo 构建 -j 4
-lightGo 运行 --release
-lightGo 清理
+nlightGo 构建 --release
+nlightGo 构建 --debug
+nlightGo 构建 --offline --locked
+nlightGo 构建 --target-dir ./build
+nlightGo 构建 -j 4
+nlightGo 运行 --release
+nlightGo 清理
 ```
 
 当前支持并会实际生效的选项包括：
@@ -364,11 +507,11 @@ manifest = "ffi/Cargo.toml"
 随后运行：
 
 ```bash
-lightGo 构建
-lightGo 运行
+nlightGo 构建
+nlightGo 运行
 ```
 
-`lightGo` 会调用 Cargo 下载和构建 `sha2`，再将生成的静态库交给 Light 链接器。
+`nlightGo` 会调用 Cargo 下载和构建 `sha2`，再将生成的静态库交给 Light 链接器。
 
 ## GUI：使用 Rust 的成熟工具箱
 
@@ -383,7 +526,7 @@ lightgo/examples/gui/
 运行：
 
 ```bash
-lightGo 运行 --manifest-path lightgo/examples/gui/lightGo.toml
+nlightGo 运行 --manifest-path lightgo/examples/gui/lightGo.toml
 ```
 
 GUI 模块会自动寻找系统中的 CJK 字体，优先支持 Droid Sans Fallback 和 Noto CJK，避免中文显示为方框。
@@ -409,18 +552,87 @@ GUI 模块会自动寻找系统中的 CJK 字体，优先支持 Droid Sans Fallb
 
 `CSS` 或 `样式` 赋值会追加到页面的 `<style>` 中，后端仍然可以使用 `请求方法()`、`请求路径()`、`请求体()` 和 `请求头()`。页面会自动注册到 `/`，并生成带有语言、标题、主题、图标和 CSS 的 HTML 页面。
 
+### 前端元素：不用写 HTML
+
+页面代码块里可以直接写元素语句，编译器会生成对应的 HTML 与配套样式（亮色/暗色主题都可用）：
+
+```light
+页面 (标题="demo" 图标=none):
+    主题 = "dark"
+    标题 "欢迎" 级别=1
+    段落 "当前版本 {1 + 1}。"
+    分隔线
+
+    容器 元素=form 动作="/submit" 方式=post 标题="留言":
+        输入框 名称="名字" 标签="你的名字" 占位提示="请输入"
+        下拉框 名称="城市" 选项=["北京", "上海"] 选中="上海"
+        按钮 "发送" 样式=主要
+    结束
+
+    进度条 值=72 最大=100
+    提示 "已保存" 级别=成功
+```
+
+元素清单：
+
+| 元素 | 文本 | 常用属性 |
+| --- | --- | --- |
+| `标题` | 文本 | `级别`(1-6) |
+| `段落` | 文本 | — |
+| `按钮` | 文字 | `动作`、`方式`(get/post)、`样式`(主要/次要/危险) |
+| `链接` | 文字 | `地址` |
+| `图片` | — | `地址`、`替代文本`、`宽度`、`高度` |
+| `输入框` | — | `名称`、`标签`、`默认值`、`占位提示`、`类型` |
+| `文本域` | — | `名称`、`标签`、`占位提示`、`行数`、`默认值` |
+| `复选框` / `单选框` | — | `名称`、`文字`、`值`、`选中` |
+| `下拉框` | — | `名称`、`选项=[...]`、`选中` |
+| `列表` | — | `项目=[...]`、`有序` |
+| `表格` | — | `表头=[...]`、`行=[[...], [...]]` |
+| `分隔线` | — | — |
+| `卡片` | — | `标题`、`内容` |
+| `标签` | 文本 | `颜色`(蓝/绿/黄/红/灰) |
+| `进度条` | — | `值`、`最大` |
+| `代码块` | 代码 | — |
+| `提示` | 文本 | `级别`(信息/成功/警告/错误) |
+| `容器` | — | `元素`(div/section/form/…)、`名称`、`标题`、`类名`、`动作`、`方式` |
+
+写法要点：
+
+- 属性值可以直接写单词（`样式=主要`、`方式=post`）；如果单词与某个变量同名，则按变量取值。
+- 元素顺序即渲染顺序；`容器` 既可以用冒号加缩进块（自动闭合），也可以用 `结束` 手动闭合。
+- 元素只能写在 `页面` 代码块里，写错元素名会给出可用元素提示。
+- 按钮默认是 `submit`，放在 `容器 元素=form` 里即可提交表单；后端用 `请求参数(请求, "名字")` 读取查询串或表单参数。
+
+后端读取参数：
+
+```light
+函数 提交(请求):
+    名字 = 请求参数(请求, "名字")
+    返回 "收到：" + 名字
+
+路由("POST", "/submit", 提交)
+```
+
+完整示例见 `lightgo/examples/elements`：
+
+```bash
+nlightGo 运行 --manifest-path lightgo/examples/elements/lightGo.toml
+```
+
+> 提示：URL 中的参数需要百分号编码（浏览器会自动处理）；命令行可用 `curl --data-urlencode`。
+
 运行或停止 Web 服务：
 
 ```bash
-lightGo web start --manifest-path lightgo/examples/page/lightGo.toml --port 8080
-lightGo web stop --manifest-path lightgo/examples/page/lightGo.toml
+nlightGo web start --manifest-path lightgo/examples/page/lightGo.toml --port 8080
+nlightGo web stop --manifest-path lightgo/examples/page/lightGo.toml
 ```
 
 中文命令同样可用：
 
 ```bash
-lightGo 网页 启动
-lightGo 网页 停止
+nlightGo 网页 启动
+nlightGo 网页 停止
 ```
 
 启动后用浏览器打开 `http://127.0.0.1:8080/`。第一版使用同步 HTTP 服务器，支持页面 HTML、精确路径、GET、POST 和文本响应；模板、静态文件和路径参数会继续完善。
@@ -461,7 +673,7 @@ LightLang 使用 `线程(编号):` 创建线程代码块。没有 `线程` 代�
 打印 "不会执行"
 ```
 
-使用 `lightc --debug` 或 `lightGo 构建 --debug` 启用 Debug 断言；默认 Release 构建会忽略它们。
+使用 `nlightc --debug` 或 `nlightGo 构建 --debug` 启用 Debug 断言；默认 Release 构建会忽略它们。
 
 ## 示例目录
 
@@ -494,24 +706,28 @@ lightgo/examples/
 light                              进入交互模式（REPL）
 light hello.light
 light --debug hello.light
-lightc hello.light -o hello
-lightc --help
+nlightc hello.light -o hello
+nlightc --help
 
-lightGo new demo
-lightGo build
-lightGo run
-lightGo clean
-lightGo delete demo --yes
+nlightGo new demo
+nlightGo build
+nlightGo run
+nlightGo clean
+nlightGo delete demo --yes
 ```
 
 ## 项目结构
 
 ```text
 light-lang/
+├── installer/                Linux 自解压安装程序（内嵌发行包的 ELF）
+├── windows-installer/        Windows 图形安装程序（MinGW GUI，自解压 EXE）
+├── packaging/windows/        WiX 5 的 MSI 工程（Product.wxs / 图标 / 许可）
+├── scripts/                  打包脚本（package.sh、package-arm.sh、package-win.sh、package-msi.sh）
 ├── light/                   Light 运行与交互（REPL）命令
 ├── lightc/                  Light 编译器
 ├── lightrt/                 Rust 运行时
-├── lightgo/                 项目工具与示例
+├── lightgo/                 项目工具与示例（含 elements 元素示例）
 ├── lightweb/                HTTP 服务器运行时
 ├── examples/                Light 示例
 ├── install.sh               发行版安装脚本
@@ -521,8 +737,10 @@ light-lang/
 
 ### 核心组件
 
+- **installer** - Linux 自解压安装程序：内嵌发行包，运行时释放并执行 `install.sh`，支持版本比较与更新
+- **windows-installer** - Windows 图形安装程序：MinGW 构建，选择目录安装/卸载，自动维护 `PATH`
 - **light** - 运行与交互命令：临时编译并直接运行 Light 源码，或进入保留变量的交互模式
-- **lightc** - 编译器，包含词法分析、语法解析、类型推导和 LLVM 代码生成
+- **nlightc** - 编译器，包含词法分析、语法解析、类型推导和 LLVM 代码生成
 - **lightrt** - Rust 运行时，提供字符串、数组、字典等核心数据类型及数学、文件、系统函数
 - **lightgo** - 项目构建工具，支持项目管理、依赖构建和 Cargo 风格选项
 - **lightweb** - 基于 Rust `tiny_http` 的轻量 HTTP 服务器运行时
@@ -541,9 +759,10 @@ LightLang 目前仍处于早期开发阶段，以下能力正在逐步完善：
 - 基于 Light 的简单配置文件格式
 - 交互模式的增量编译：当前每输入一句都会重新编译整段会话，会话很大时响应会变慢
 
-目前发行包主要面向 Linux x86_64，其他平台需要根据系统工具链单独构建。
+目前 Linux x86_64、Linux aarch64/armv7 提供发行包与自解压安装程序；
+Windows x64 提供图形安装程序（EXE，自解压）与 MSI 安装包（MSI 的图形向导需在 Windows 上构建）。
+Windows ARM64 可通过 `cargo build --release --target aarch64-pc-windows-gnullvm` 自行构建。
 
-CI（`.gitcode/workflows/ci.yml`）会构建 Linux x86_64（glibc 与 musl 静态）、Linux aarch64/armv7、Windows MSVC 与 MinGW（x64）以及 Windows ARM64 的产物；Windows 与 ARM 目前只提供构建产物，尚未提供安装包。
 
 ## 路线图
 
@@ -573,15 +792,14 @@ cargo check --release
 cargo build --release
 ```
 
-持续集成配置在 `.gitcode/workflows/ci.yml`，覆盖 Linux x86_64、Linux aarch64/armv7、Windows MSVC、MinGW 与 Windows ARM64：
+发行包与自解压安装程序在本地用一条命令构建：
 
-| 任务 | 内容 |
-| --- | --- |
-| `linux-elf` | x86_64 glibc 与 musl 静态构建、冒烟测试、打包发行版 |
-| `linux-arm` | aarch64（glibc/musl）与 armv7 交叉编译 |
-| `windows-msvc` | x64 MSVC 构建、版本自检、编译并运行 Light 程序 |
-| `windows-mingw` | x64 MinGW 构建与版本自检 |
-| `windows-arm64` | ARM64 MSVC 交叉编译 |
+```bash
+./scripts/package.sh
+```
+
+它会生成 `dist/light-lang-<版本>-linux-x86_64.tar.gz` 和同名的 `-installer`
+自解压安装程序（Linux ELF，运行后自动释放并执行 `install.sh`）。
 
 如果希望参与语言设计，请优先说明：
 

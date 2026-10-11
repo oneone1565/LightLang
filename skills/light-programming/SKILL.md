@@ -1,20 +1,20 @@
 ---
 name: light-programming
-description: 规范使用 LightLang 编写 .light 程序，涵盖中文语法、模块、lightWeb 页面、线程、断言、lightGo 项目管理和验证流程。
+description: 规范使用 LightLang 编写 .light 程序，涵盖中文语法、模块、nlightWeb 页面、线程、断言、nlightGo 项目管理和验证流程。
 ---
 
 # Light 编程规范
 
 ## 适用范围
 
-使用本 Skill 编写、修改或审查 `.light` 源码。目标是保持中文语法简洁、行为可预测，并让程序能够通过 `lightc` 或 `lightGo` 构建。
+使用本 Skill 编写、修改或审查 `.light` 源码。目标是保持中文语法简洁、行为可预测，并让程序能够通过 `nlightc` 或 `nlightGo` 构建。
 
 ## 项目约定
 
 - 源码使用 `.light` 扩展名。
 - 简单程序直接使用顶层语句，不为普通脚本强行添加 `main`。
 - 需要 Cargo 依赖、FFI、Web 或 GUI 时，建立 `lightGo.toml`。
-- 从项目任意子目录执行 `lightGo 构建` 或 `lightGo 运行`；工具会向上寻找 `lightGo.toml`。
+- 从项目任意子目录执行 `nlightGo 构建` 或 `nlightGo 运行`；工具会向上寻找 `lightGo.toml`。
 - 目标程序默认使用 Release；只有开发调试时使用 `--debug`。
 
 ## 基础语法
@@ -157,8 +157,9 @@ description: 规范使用 LightLang 编写 .light 程序，涵盖中文语法、
 - 主线程没有语句时不产生额外输出；程序结束前会自动等待线程。
 - 当前线程函数应保持简单，优先通过参数传递普通数据。
 
-## lightWeb
+## nlightWeb
 
+网页语法必须在文件开头导入 `lightWeb`（不导入会报「请先在文件开头导入」）。
 同一个程序可以同时提供后端接口和浏览器页面：
 
 ```light
@@ -180,7 +181,49 @@ description: 规范使用 LightLang 编写 .light 程序，涵盖中文语法、
 - `页面` 返回浏览器可渲染的 HTML，并支持 `语言`、`主题`、`标题`、`图标` 和 `CSS`/`样式`。
 - 页面内的 `打印` 内容写入 HTML 响应；后端函数中的 `打印` 仍输出到终端。
 - 当前页面默认注册到 `/`，路由路径必须精确匹配。
-- 启动和停止服务使用 `lightGo web start` 与 `lightGo web stop`，中文命令是 `lightGo 网页 启动/停止`。
+- 启动和停止服务使用 `nlightGo web start` 与 `nlightGo web stop`，中文命令是 `nlightGo 网页 启动/停止`。
+
+## 页面元素
+
+`页面` 代码块内可直接写元素语句，不要手写 HTML：
+
+```light
+页面 (标题="demo" 图标=none):
+    主题 = "dark"
+    标题 "欢迎" 级别=1
+    段落 "版本 {1 + 1}。"
+    按钮 "提交" 动作="/submit" 方式=post 样式=主要
+    输入框 名称="名字" 标签="名字" 占位提示="请输入"
+    下拉框 名称="城市" 选项=["北京", "上海"] 选中="上海"
+    表格 表头=["名称", "值"] 行=[["a", "1"]]
+    容器 元素=form 动作="/submit" 方式=post:
+        按钮 "发送"
+    提示 "已保存" 级别=成功
+```
+
+- 可用元素：标题、段落、按钮、链接、图片、输入框、文本域、复选框、单选框、下拉框、列表、表格、分隔线、卡片、标签、进度条、代码块、提示、容器、结束。
+- 属性值可写单词（`样式=主要`）；与变量同名时按变量取值。
+- `容器` 用冒号加缩进块自动闭合，也可用 `结束` 手动闭合。
+- 表单参数用 `请求参数(请求, "名字")` 读取；元素只能写在 `页面` 内。
+- 需要自定义 HTML 时仍可使用 `打印 "<div>…</div>"`。
+
+## 别名：用自己的写法
+
+`.llang` 文件里每行写一条 `别名 : 原名`，导入后两种写法完全等价：
+
+```
+# 英文别名.llang
+print : 打印
+len : 长度
+```
+
+```light
+导入 "英文别名.llang"
+print "hi"     # 等价于 打印 "hi"
+```
+
+扩展名 `.llang` 不能省，否则分不清是 .light 模块、.rs 原生模块还是别名文件。
+用户自己定义的同名函数优先于别名。别名只改名字，不改变类型与运行期表示。
 
 ## 断言
 
@@ -188,7 +231,7 @@ description: 规范使用 LightLang 编写 .light 程序，涵盖中文语法、
 断言 数量 >= 0, "数量不能为负数"
 ```
 
-- 使用 `lightc --debug` 或 `lightGo 构建 --debug` 启用。
+- 使用 `nlightc --debug` 或 `nlightGo 构建 --debug` 启用。
 - 断言消息使用字符串字面量。
 - 不要把业务逻辑依赖在 Release 断言上。
 
@@ -197,14 +240,14 @@ description: 规范使用 LightLang 编写 .light 程序，涵盖中文语法、
 普通程序：
 
 ```bash
-lightc hello.light -o hello
+nlightc hello.light -o hello
 ./hello
 ```
 
 临时运行单个文件：
 
 ```bash
-light hello.light
+nlight hello.light
 ```
 
 交互模式（逐句执行，变量保留，只显示当前句输出）：
@@ -227,15 +270,15 @@ light
 项目程序：
 
 ```bash
-lightGo 构建
-lightGo 运行
-lightGo 清理
+nlightGo 构建
+nlightGo 运行
+nlightGo 清理
 ```
 
 开发检查：
 
 ```bash
-lightGo 构建 --debug
+nlightGo 构建 --debug
 cargo check --release
 ```
 
@@ -248,4 +291,4 @@ cargo check --release
 - 是否在 Release 依赖了断言行为？
 - 线程任务是否互相独立并有明确等待？
 - Web 页面是否返回 HTML，后端是否使用正确的响应类型？
-- 是否用 `lightGo 构建` 和实际运行验证过？
+- 是否用 `nlightGo 构建` 和实际运行验证过？
