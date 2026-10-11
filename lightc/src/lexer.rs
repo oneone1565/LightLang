@@ -230,7 +230,8 @@ impl Lexer {
     }
 
     fn keyword(s: &str) -> Option<TokenKind> {
-        match s {
+        let s = &crate::alias::resolve(s);
+        match s.as_str() {
             "让" => Some(TokenKind::Let),
             "打印" => Some(TokenKind::Print),
             "抛出" => Some(TokenKind::Throw),
