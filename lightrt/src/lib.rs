@@ -243,6 +243,133 @@ pub extern "C" fn light_print_str(ptr: *const u8, len: usize) {
     let _ = std::io::stdout().flush();
 }
 
+/// 命令行参数（带标签的数组，元素是字符串）
+#[no_mangle]
+pub extern "C" fn light_argv() -> *mut LightArray {
+    let args: Vec<String> = std::env::args().collect();
+    let array = make_array(vec![0i64; args.len()], vec![TAG_INT; args.len()]);
+    for (i, a) in args.iter().enumerate() {
+        let s = make_str(a.clone().into_bytes());
+        let arr = unsafe { &mut *array };
+        arr.data[i] = s as i64;
+        arr.tags[i] = TAG_STR;
+    }
+    array
+}
+
+// ---------------------------------------------------------------------------
+// 机器层：给用 Light 实现的运行时（nlightRT）用的裸内存原语。
+// 这几个函数是自举的地板——没有它们，Light 里就没法表达数据结构。
+// ---------------------------------------------------------------------------
+
+/// 分配 n 字节（对齐到 8），返回可用地址；失败返回 0。
+/// 前面预留 8 字节存长度，释放时才知道该用哪个 Layout。
+#[no_mangle]
+pub extern "C" fn light_mem_alloc(n: i64) -> i64 {
+    if n <= 0 {
+        return 0;
+    }
+    let total = n as usize + 8;
+    let layout = match std::alloc::Layout::from_size_align(total, 8) {
+        Ok(l) => l,
+        Err(_) => return 0,
+    };
+    unsafe {
+        let p = std::alloc::alloc(layout);
+        if p.is_null() {
+            return 0;
+        }
+        std::ptr::write_bytes(p, 0, total);
+        (p as *mut i64).write_unaligned(total as i64);
+        (p as i64) + 8
+    }
+}
+
+/// 释放 light_mem_alloc 得到的内存
+#[no_mangle]
+pub extern "C" fn light_mem_free(p: i64) {
+    if p == 0 {
+        return;
+    }
+    unsafe {
+        let head = (p - 8) as *mut i64;
+        let total = head.read_unaligned() as usize;
+        head.write_bytes(0xAA, 8);
+        std::alloc::dealloc(head as *mut u8, std::alloc::Layout::from_size_align(total, 8).unwrap());
+    }
+}
+
+/// 复制 n 字节，返回目标地址
+#[no_mangle]
+pub extern "C" fn light_mem_copy(dst: i64, src: i64, n: i64) -> i64 {
+    if dst == 0 || src == 0 || n <= 0 {
+        return dst;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(src as *const u8, dst as *mut u8, n as usize);
+    }
+    dst
+}
+
+/// 清零 n 字节
+#[no_mangle]
+pub extern "C" fn light_mem_zero(p: i64, n: i64) {
+    if p == 0 || n <= 0 {
+        return;
+    }
+    unsafe {
+        std::ptr::write_bytes(p as *mut u8, 0, n as usize);
+    }
+}
+
+/// 读 8 字节（当作有符号整数）
+#[no_mangle]
+pub extern "C" fn light_mem_load(p: i64) -> i64 {
+    if p == 0 {
+        return 0;
+    }
+    unsafe { (p as *const i64).read_unaligned() }
+}
+
+/// 写 8 字节
+#[no_mangle]
+pub extern "C" fn light_mem_store(p: i64, v: i64) {
+    if p == 0 {
+        return;
+    }
+    unsafe { (p as *mut i64).write_unaligned(v) }
+}
+
+/// 读 1 字节（0..255）
+#[no_mangle]
+pub extern "C" fn light_mem_load8(p: i64) -> i64 {
+    if p == 0 {
+        return 0;
+    }
+    unsafe { (p as *const u8).read_unaligned() as i64 }
+}
+
+/// 写 1 字节
+#[no_mangle]
+pub extern "C" fn light_mem_store8(p: i64, v: i64) {
+    if p == 0 {
+        return;
+    }
+    unsafe { (p as *mut u8).write_unaligned((v & 0xff) as u8) }
+}
+
+/// 诊断信息走标准错误：编译器的正常产物写 stdout，两者不能混
+#[no_mangle]
+pub extern "C" fn light_eprint_str(ptr: *const u8, len: i64) {
+    if ptr.is_null() {
+        unsafe { abort("错误输出：空字符串指针"); }
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+    let s = String::from_utf8_lossy(bytes);
+    eprint!("{}", s);
+    let _ = std::io::stderr().flush();
+}
+
 #[no_mangle]
 pub extern "C" fn light_print_newline() {
     if !repl_visible() {
@@ -436,6 +563,148 @@ fn fmt_dict(d: *const LightDict) -> String {
     s
 }
 
+/// 字符串按 UTF-8 字节序比较：小于返回 -1，等于 0，大于 1
+#[no_mangle]
+pub extern "C" fn light_str_cmp(a: *const LightStr, b: *const LightStr) -> i64 {
+    let (pa, la) = if a.is_null() {
+        (std::ptr::null(), 0)
+    } else {
+        unsafe { ((*a).ptr, (*a).len) }
+    };
+    let (pb, lb) = if b.is_null() {
+        (std::ptr::null(), 0)
+    } else {
+        unsafe { ((*b).ptr, (*b).len) }
+    };
+    let sa = if pa.is_null() { &[][..] } else { unsafe { std::slice::from_raw_parts(pa, la) } };
+    let sb = if pb.is_null() { &[][..] } else { unsafe { std::slice::from_raw_parts(pb, lb) } };
+    match sa.cmp(sb) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+
+/// 读取标准输入剩余全部内容（自举编译器用它读源码）
+#[no_mangle]
+pub extern "C" fn light_read_all_stdin() -> *mut LightStr {
+    use std::io::Read;
+    let mut buffer = Vec::new();
+    let _ = std::io::stdin().read_to_end(&mut buffer);
+    make_str(buffer)
+}
+
+/// 把「值 + 类型标签」打包进一个整数：高位存标签，低 56 位存值。
+/// 列表元素的类型在编译期不可知，代码生成用它在运行期还原类型。
+#[no_mangle]
+pub extern "C" fn light_tagged(value: i64, tag: i32) -> i64 {
+    let masked = value & 0x00FF_FFFF_FFFF_FFFF;
+    (((tag as i64) & 0xFF) << 56) | masked
+}
+
+/// 未知类型的值转成文本：按标签分派，返回新建的 LightStr
+#[no_mangle]
+pub extern "C" fn light_dynamic_to_text(value: i64, tag: i32) -> *mut LightStr {
+    match tag {
+        0 => make_str(value.to_string().into_bytes()),
+        1 => make_str(f64::from_bits(value as u64).to_string().into_bytes()),
+        2 => {
+            // 复制一份：调用方会释放返回值，不能把原字符串的所有权带走
+            let src = light_untag(value) as *const LightStr;
+            if src.is_null() {
+                make_str(Vec::new())
+            } else {
+                light_str_dup(src)
+            }
+        }
+        3 => make_str(if value != 0 { "真".to_string() } else { "假".to_string() }.into_bytes()),
+        5 | 6 | 7 => make_str(fmt_value(tag as u8, value).into_bytes()),
+        _ => make_str("空".to_string().into_bytes()),
+    }
+}
+
+/// 复制一个字符串（按值传参用）
+#[no_mangle]
+pub extern "C" fn light_str_dup(s: *const LightStr) -> *mut LightStr {
+    if s.is_null() {
+        return s as *mut LightStr;
+    }
+    let v = unsafe { &*s };
+    let bytes: Vec<u8> = unsafe { std::slice::from_raw_parts(v.ptr, v.len) }.to_vec();
+    make_str(bytes)
+}
+
+/// 类型运行期才知道的容器是否包含给定元素：按标签分派
+#[no_mangle]
+pub extern "C" fn light_dynamic_contains(container: i64, value: i64, vtag: i32) -> bool {
+    match light_tag_of(container) {
+        2 => {
+            let s = light_untag(container) as *const LightStr;
+            let sub = value as *const LightStr;
+            if s.is_null() || sub.is_null() {
+                return false;
+            }
+            let hay = unsafe { &*s };
+            let needle = unsafe { &*sub };
+            let hay_bytes = unsafe { std::slice::from_raw_parts(hay.ptr, hay.len) };
+            let needle_bytes = unsafe { std::slice::from_raw_parts(needle.ptr, needle.len) };
+            hay_bytes.windows(needle_bytes.len().max(1)).any(|w| w == needle_bytes)
+        }
+        5 | 7 => light_array_contains(light_untag(container) as *const LightArray, value),
+        6 => light_dict_has(light_untag(container) as *const LightDict, vtag, value),
+        _ => false,
+    }
+}
+
+/// 类型运行期才知道的值的长度：按标签分派
+#[no_mangle]
+pub extern "C" fn light_dynamic_len(value: i64) -> i64 {
+    match light_tag_of(value) {
+        2 => light_str_len(light_untag(value) as *mut LightStr) as i64,
+        5 | 7 => light_array_len(light_untag(value) as *mut LightArray) as i64,
+        6 => light_dict_len(light_untag(value) as *mut LightDict) as i64,
+        _ => 0,
+    }
+}
+
+/// 对「类型运行期才知道」的容器做下标读，按容器种类分派。
+/// 返回值同样是带标签的：列表/元组返回元素及其标签，字典返回文本，字符串返回字符码。
+#[no_mangle]
+pub extern "C" fn light_dynamic_get(base: i64, index: i64) -> i64 {
+    let tag = light_tag_of(base);
+    let ptr = light_untag(base) as *mut LightArray;
+    match tag {
+        5 | 7 => {
+            let index = if index < 0 { (light_array_len(ptr) as i64 + index) as usize } else { index as usize };
+            let value = light_array_get(ptr, index);
+            let etag = light_array_get_tag(ptr, index);
+            light_tagged(value, etag)
+        }
+        6 => {
+            let d = light_untag(base) as *mut LightDict;
+            let text = light_dict_get_text(d, 2, index);
+            light_tagged(text as i64, 2)
+        }
+        2 => {
+            let s = light_untag(base) as *mut LightStr;
+            light_tagged(light_str_index(s, index), 0)
+        }
+        _ => 0,
+    }
+}
+
+/// 取回标签
+#[no_mangle]
+pub extern "C" fn light_tag_of(value: i64) -> i32 {
+    (((value >> 56) & 0xFF) as i32) & 0x7
+}
+
+/// 去掉标签，取出真实值
+#[no_mangle]
+pub extern "C" fn light_untag(value: i64) -> i64 {
+    value & 0x00FF_FFFF_FFFF_FFFF
+}
+
 #[no_mangle]
 pub extern "C" fn light_print_value(v: i64, tag: i32) {
     if !repl_visible() {
@@ -443,6 +712,77 @@ pub extern "C" fn light_print_value(v: i64, tag: i32) {
     }
     print!("{}", fmt_value(tag as u8, v));
     let _ = std::io::stdout().flush();
+}
+
+// ---------------------------------------------------------------------------
+// 结构化值编码：供前端（lightWeb）读取任意值
+//   标量：s<字节数>:<内容>
+//   列表：l<元素数>:<元素…>      元组：t<元素数>:<元素…>
+//   字典型：d<键值对数>:<键><值>…
+// ---------------------------------------------------------------------------
+
+fn encode_value(tag: u8, value: i64, out: &mut String) {
+    match tag {
+        TAG_ARRAY => {
+            out.push('l');
+            encode_sequence(value as *const LightArray, false, out);
+        }
+        TAG_TUPLE => {
+            out.push('t');
+            encode_sequence(value as *const LightArray, true, out);
+        }
+        TAG_DICT => {
+            out.push('d');
+            let dict = if value == 0 {
+                std::ptr::null()
+            } else {
+                value as *const LightDict
+            };
+            let len = if dict.is_null() { 0 } else { unsafe { &*dict }.keys.len() };
+            out.push_str(&len.to_string());
+            out.push(':');
+            for index in 0..len {
+                let d = unsafe { &*dict };
+                let (key_tag, key) = d.keys[index];
+                let (val_tag, val) = d.vals[index];
+                encode_value(key_tag, key, out);
+                encode_value(val_tag, val, out);
+            }
+        }
+        _ => {
+            out.push('s');
+            let text = fmt_value(tag, value);
+            out.push_str(&text.len().to_string());
+            out.push(':');
+            out.push_str(&text);
+        }
+    }
+}
+
+fn encode_sequence(array: *const LightArray, tuple: bool, out: &mut String) {
+    let len = if array.is_null() { 0 } else { unsafe { &*array }.len };
+    out.push_str(&len.to_string());
+    out.push(':');
+    for index in 0..len {
+        let a = unsafe { &*array };
+        encode_value(a.tags[index], a.data[index], out);
+    }
+    let _ = tuple;
+}
+
+#[no_mangle]
+pub extern "C" fn light_value_tree(v: i64, tag: i32) -> *mut LightStr {
+    let mut out = String::new();
+    encode_value(tag as u8, v, &mut out);
+    make_str(out.into_bytes())
+}
+
+/// 把结构化值编码成字符串，供不需要 LightStr 的调用方使用
+#[no_mangle]
+pub extern "C" fn light_value_tree_len(v: i64, tag: i32) -> i64 {
+    let mut out = String::new();
+    encode_value(tag as u8, v, &mut out);
+    out.len() as i64
 }
 
 // ---------------------------------------------------------------------------
@@ -1092,6 +1432,63 @@ pub extern "C" fn light_dict_set(d: *mut LightDict, ktag: i32, k: i64, vtag: i32
 }
 
 /// 返回键数组（深拷贝），供 for-in 遍历；调用方负责释放。
+#[no_mangle]
+/// 字典取值：统一返回文本形式（值本身带标签，转成可读文本）
+#[no_mangle]
+pub extern "C" fn light_dict_get_text(d: *const LightDict, ktag: i32, k: i64) -> *mut LightStr {
+    if d.is_null() {
+        unsafe { abort("取出：字典指针为空"); }
+    }
+    let dd = unsafe { &*d };
+    match dict_find(dd, ktag as u8, k) {
+        Some(index) => {
+            let (vtag, v) = dd.vals[index];
+            make_str(fmt_value(vtag, v).into_bytes())
+        }
+        None => make_str(Vec::new()),
+    }
+}
+
+/// 取列表元素的原始值（不做类型检查，配合 light_array_get_tag 使用）
+#[no_mangle]
+pub extern "C" fn light_array_get_raw(arr: *const LightArray, index: i64) -> i64 {
+    if arr.is_null() {
+        unsafe { abort("取元素：数组指针为空"); }
+    }
+    let a = unsafe { &*arr };
+    if index < 0 || index as usize >= a.len {
+        unsafe { abort(&format!("数组越界读取：索引 {} >= 长度 {}", index, a.len)); }
+    }
+    a.data[index as usize]
+}
+
+/// 取列表元素的文本形式（按元素自身的标签格式化）
+#[no_mangle]
+pub extern "C" fn light_array_get_text(arr: *const LightArray, index: i64) -> *mut LightStr {
+    if arr.is_null() {
+        unsafe { abort("取元素：数组指针为空"); }
+    }
+    let a = unsafe { &*arr };
+    if index < 0 || index as usize >= a.len {
+        unsafe { abort(&format!("数组越界读取：索引 {} >= 长度 {}", index, a.len)); }
+    }
+    let pos = index as usize;
+    make_str(fmt_value(a.tags[pos], a.data[pos]).into_bytes())
+}
+
+/// 取列表元素的标签（0 整数 1 浮点 2 字符串 3 布尔 4 空 5 数组 7 元组 6 字典）
+#[no_mangle]
+pub extern "C" fn light_array_tag_at(arr: *const LightArray, index: i64) -> i64 {
+    if arr.is_null() {
+        unsafe { abort("取元素：数组指针为空"); }
+    }
+    let a = unsafe { &*arr };
+    if index < 0 || index as usize >= a.len {
+        unsafe { abort(&format!("数组越界读取：索引 {} >= 长度 {}", index, a.len)); }
+    }
+    a.tags[index as usize] as i64
+}
+
 #[no_mangle]
 pub extern "C" fn light_dict_keys(d: *const LightDict) -> *mut LightArray {
     if d.is_null() {

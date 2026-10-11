@@ -4,7 +4,7 @@ version = "0.2.1"
 edition = "2021"
 
 [[bin]]
-name = "lightc"
+name = "nlightc"
 path = "src/main.rs"
 
 [dependencies]

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["light", "lightc", "lightgo", "lightrt", "lightweb"]
+members = ["installer", "light", "lightc", "lightgo", "lightrt", "lightweb", "windows-installer"]
 
 [profile.release]
 opt-level = 3

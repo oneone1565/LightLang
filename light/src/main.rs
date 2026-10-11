@@ -10,7 +10,7 @@ fn main() {
     match run() {
         Ok(code) => std::process::exit(code),
         Err(error) => {
-            eprintln!("light 错误：{}", error);
+            eprintln!("nlight 错误：{}", error);
             std::process::exit(1);
         }
     }
@@ -27,7 +27,10 @@ fn run() -> Result<i32, String> {
                 return Ok(0);
             }
             "--version" | "-V" => {
-                println!("light {}", VERSION);
+                println!(
+            "nlight {}（nextlight 套件：nlightc 编译器 / nlightRT 运行时 / nlightGo 工程工具 / nlight 交互环境）",
+            VERSION
+        );
                 return Ok(0);
             }
             "--debug" | "-d" => {
@@ -94,7 +97,7 @@ fn repl(debug: bool) -> Result<i32, String> {
     let mut carry: Option<String> = None;
 
     if interactive {
-        println!("LightLang {} 交互模式（输入 退出 结束会话，输入 帮助 查看命令）", VERSION);
+        println!("nlight {} 交互模式（输入 退出 结束会话，输入 帮助 查看命令）", VERSION);
     }
 
     loop {

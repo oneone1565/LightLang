@@ -1,10 +1,10 @@
 [package]
-name = "lightgo"
+name = "nlightgo"
 version = "0.2.1"
 edition = "2021"
 
 [[bin]]
-name = "lightGo"
+name = "nlightGo"
 path = "src/main.rs"
 
 [dependencies]

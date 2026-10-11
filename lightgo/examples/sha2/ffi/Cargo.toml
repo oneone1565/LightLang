@@ -8,6 +8,6 @@ crate-type = ["staticlib"]
 
 [dependencies]
 sha2 = "0.11.0"
-lightrt = { path = "../../../../lightrt" }
+lightrt = { path = "../../../../lightrt", package = "lightrt" }
 
 [workspace]

@@ -83,17 +83,17 @@ confirm() {
 
 if [[ "$uninstall" == true ]]; then
     confirm
-    as_root rm -f "$prefix/bin/light" "$prefix/bin/lightc" "$prefix/bin/lightGo" "$prefix/lib/liblightrt.a" "$prefix/etc/profile.d/lightlang.sh"
-    as_root rm -rf "$prefix/share/light-lang"
-    printf '%s\n' "LightLang 已卸载"
+    as_root rm -f "$prefix/bin/nlight" "$prefix/bin/nlightc" "$prefix/bin/nlightGo" "$prefix/bin/light" "$prefix/bin/lightc" "$prefix/bin/lightGo" "$prefix/lib/libnlightrt.a" "$prefix/lib/libnlightRT.a" "$prefix/lib/liblightrt.a" "$prefix/etc/profile.d/lightlang.sh"
+    as_root rm -rf "$prefix/share/light-lang"    printf '%s\n' "LightLang 已卸载"
     exit 0
 fi
 
 required_files=(
-    "$script_dir/bin/light"
-    "$script_dir/bin/lightc"
-    "$script_dir/bin/lightGo"
-    "$script_dir/lib/liblightrt.a"
+    "$script_dir/bin/nlight"
+    "$script_dir/bin/nlightc"
+    "$script_dir/bin/nlightGo"
+    "$script_dir/lib/libnlightrt.a"
+    "$script_dir/lib/libnlightRT.a"
 )
 for file in "${required_files[@]}"; do
     if [[ ! -f "$file" ]]; then
@@ -103,13 +103,24 @@ for file in "${required_files[@]}"; do
 done
 
 confirm
-as_root install -Dm755 "$script_dir/bin/light" "$prefix/bin/light"
-as_root install -Dm755 "$script_dir/bin/lightc" "$prefix/bin/lightc"
-as_root install -Dm755 "$script_dir/bin/lightGo" "$prefix/bin/lightGo"
-as_root install -Dm644 "$script_dir/lib/liblightrt.a" "$prefix/lib/liblightrt.a"
+as_root install -Dm755 "$script_dir/bin/nlight" "$prefix/bin/nlight"
+as_root install -Dm755 "$script_dir/bin/nlightc" "$prefix/bin/nlightc"
+as_root install -Dm755 "$script_dir/bin/nlightGo" "$prefix/bin/nlightGo"
+as_root install -Dm644 "$script_dir/lib/libnlightrt.a" "$prefix/lib/libnlightrt.a"
+as_root install -Dm644 "$script_dir/lib/libnlightRT.a" "$prefix/lib/libnlightRT.a"
 as_root mkdir -p "$prefix/share/light-lang"
-if [[ -d "$script_dir/share/light-lang/examples" ]]; then
-    as_root cp -R "$script_dir/share/light-lang/examples" "$prefix/share/light-lang/"
+for share_dir in examples lightffi lightrt lightweb nlight; do
+    if [[ -d "$script_dir/share/light-lang/$share_dir" ]]; then
+        as_root cp -R "$script_dir/share/light-lang/$share_dir" "$prefix/share/light-lang/"
+    fi
+done
+# 记录已安装版本，供安装程序比较并执行更新
+installed_version="${LIGHT_VERSION:-}"
+if [[ -z "$installed_version" ]]; then
+    installed_version="$("$script_dir/bin/nlightc" --version 2>/dev/null | awk '{print $2}')"
+fi
+if [[ -n "$installed_version" ]]; then
+    printf '%s\n' "$installed_version" | as_root tee "$prefix/share/light-lang/VERSION" >/dev/null
 fi
 as_root mkdir -p "$prefix/etc/profile.d"
 printf 'export PATH="%s/bin:$PATH"\n' "$prefix" | as_root tee "$prefix/etc/profile.d/lightlang.sh" >/dev/null

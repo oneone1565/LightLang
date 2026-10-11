@@ -47,7 +47,7 @@ struct BuildOptions {
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("lightGo 错误：{}", error);
+        eprintln!("nlightGo 错误：{}", error);
         std::process::exit(1);
     }
 }
@@ -55,7 +55,10 @@ fn main() {
 fn run() -> Result<(), String> {
     let mut args: Vec<String> = env::args().skip(1).collect();
     if args.len() == 1 && matches!(args[0].as_str(), "--version" | "-V") {
-        println!("lightGo {}", env!("CARGO_PKG_VERSION"));
+        println!(
+            "nlightGo {}（nextlight 套件：nlightc 编译器 / nlightRT 运行时 / nlightGo 工程工具 / nlight 交互环境）",
+            env!("CARGO_PKG_VERSION")
+        );
         return Ok(());
     }
     if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
@@ -66,7 +69,7 @@ fn run() -> Result<(), String> {
     let raw_command = args.remove(0);
     if raw_command == "web" || raw_command == "网页" {
         if args.is_empty() {
-            return Err("用法：lightGo web start|stop".into());
+            return Err("用法：nlightGo web start|stop".into());
         }
         let action = args.remove(0);
         return web_command(&action, &args);
@@ -158,8 +161,8 @@ fn web_command(action: &str, args: &[String]) -> Result<(), String> {
                 .map_err(|e| format!("启动 lightWeb 失败：{}", e))?;
             fs::write(&pid_path, child.id().to_string())
                 .map_err(|e| format!("写入 Web PID 失败：{}", e))?;
-            println!("lightWeb 已启动：http://127.0.0.1:{}", port);
-            println!("停止服务：lightGo web stop");
+            println!("nlightGo web 已启动：http://127.0.0.1:{}", port);
+            println!("停止服务：nlightGo web stop");
             Ok(())
         }
         "stop" | "停止" => {
@@ -175,7 +178,7 @@ fn web_command(action: &str, args: &[String]) -> Result<(), String> {
                 .map_err(|e| format!("停止 lightWeb 失败：{}", e))?;
             let _ = fs::remove_file(&pid_path);
             if status.success() {
-                println!("lightWeb 已停止");
+                println!("nlightGo web 已停止");
                 Ok(())
             } else {
                 Err("lightWeb 进程未能停止".into())
@@ -453,7 +456,7 @@ fn delete_project(args: &[String]) -> Result<(), String> {
 }
 
 fn create_project(args: &[String]) -> Result<(), String> {
-    let name = args.first().ok_or("用法：lightGo 新建 <项目名>")?;
+    let name = args.first().ok_or("用法：nlightGo 新建 <项目名>")?;
     let root = PathBuf::from(name);
     let package_name = root
         .file_name()
@@ -474,8 +477,8 @@ fn create_project(args: &[String]) -> Result<(), String> {
 }
 
 fn print_help() {
-    println!("用法：lightGo <构建|运行|清理|删除|新建> [选项]");
-    println!("Web 命令：lightGo web start|stop 或 lightGo 网页 启动|停止 [--port 端口]");
+    println!("用法：nlightGo <构建|运行|清理|删除|新建> [选项]");
+    println!("Web 命令：nlightGo web start|stop 或 nlightGo 网页 启动|停止 [--port 端口]");
     println!("常用选项：--release --debug --profile <名称> --target-dir <目录>");
     println!("Cargo 选项：--offline --locked --frozen -j/--jobs --features --all-features");
     println!("删除项目：lightGo 删除 <目录> [--yes]");

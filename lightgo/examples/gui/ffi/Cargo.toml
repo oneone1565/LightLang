@@ -8,6 +8,6 @@ crate-type = ["staticlib"]
 
 [dependencies]
 eframe = "0.36.2"
-lightrt = { path = "../../../../lightrt" }
+lightrt = { path = "../../../../lightrt", package = "lightrt" }
 
 [workspace]
