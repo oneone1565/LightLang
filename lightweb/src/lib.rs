@@ -1,14 +1,18 @@
 use std::cell::RefCell;
 use std::os::raw::c_void;
-use std::ptr;
 use std::sync::{Mutex, OnceLock};
 use tiny_http::{Header, Request, Response, Server};
+
+pub mod elements;
+
+use elements::Element;
 
 extern "C" {
     fn light_str_from_utf8(ptr: *const u8, len: usize) -> *mut c_void;
     fn light_str_ptr(s: *const c_void) -> *const u8;
     fn light_str_len(s: *const c_void) -> usize;
     fn light_str_free(s: *mut c_void);
+    fn light_value_tree(v: i64, tag: i32) -> *mut c_void;
 }
 
 pub type LightHandler = unsafe extern "C" fn(i64) -> i64;
@@ -29,6 +33,8 @@ struct Route {
 struct WebRequest {
     method: String,
     path: String,
+    /// URL 中的查询串（不含 ?）
+    query: String,
     body: Vec<u8>,
     headers: Vec<(String, String)>,
 }
@@ -40,6 +46,10 @@ struct PageState {
     theme: String,
     styles: Vec<u8>,
     content: Vec<u8>,
+    /// 正在构建的元素
+    element: Option<Element>,
+    /// 尚未闭合的容器标签
+    open_containers: Vec<String>,
 }
 
 thread_local! {
@@ -50,6 +60,8 @@ thread_local! {
         theme: String::from("light"),
         styles: Vec::new(),
         content: Vec::new(),
+        element: None,
+        open_containers: Vec::new(),
     });
 }
 
@@ -175,6 +187,8 @@ pub unsafe extern "C" fn light_page_reset(
             theme: String::from("light"),
             styles: Vec::new(),
             content: Vec::new(),
+            element: None,
+            open_containers: Vec::new(),
         };
     });
 }
@@ -216,8 +230,101 @@ pub unsafe extern "C" fn light_page_append_bool(value: i64) {
     page_append_value(value != 0);
 }
 
+// ---------------------------------------------------------------------------
+// 前端元素
+// ---------------------------------------------------------------------------
+
+fn take_element() -> Option<Element> {
+    PAGE.with(|page| page.borrow_mut().element.take())
+}
+
+fn flush_element() {
+    if let Some(element) = take_element() {
+        let html = elements::render_element(&element);
+        page_append_str(&html);
+        if element.kind == elements::KIND_CONTAINER {
+            let tag = elements::container_tag(&element);
+            PAGE.with(|page| page.borrow_mut().open_containers.push(tag));
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn light_page_element_begin(kind: i32) {
+    flush_element();
+    PAGE.with(|page| {
+        page.borrow_mut().element = Some(Element { kind, ..Default::default() });
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn light_page_element_text(value: i64, tag: i32) {
+    let text = light_value_text(value, tag);
+    PAGE.with(|page| {
+        if let Some(element) = page.borrow_mut().element.as_mut() {
+            element.text = Some(text);
+        }
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn light_page_element_attr(
+    key_ptr: *const u8,
+    key_len: i64,
+    value: i64,
+    tag: i32,
+) {
+    let key = string_from_ptr(key_ptr, key_len);
+    let encoded = light_value_text(value, tag);
+    PAGE.with(|page| {
+        if let Some(element) = page.borrow_mut().element.as_mut() {
+            element.attrs.push((key, elements::AttrValue::from_encoded(&encoded)));
+        }
+    });
+}
+
+/// 结束当前元素
+#[no_mangle]
+pub unsafe extern "C" fn light_page_element_end() {
+    flush_element();
+}
+
+/// 关闭最近一个未闭合的容器
+#[no_mangle]
+pub unsafe extern "C" fn light_page_element_close() {
+    flush_element();
+    PAGE.with(|page| {
+        let mut state = page.borrow_mut();
+        if let Some(tag) = state.open_containers.pop() {
+            let html = format!("</{}>\n", tag);
+            state.content.extend_from_slice(html.as_bytes());
+        }
+    });
+}
+
+/// 读取 lightrt 生成的结构化值文本
+unsafe fn light_value_text(value: i64, tag: i32) -> String {
+    let ptr = light_value_tree(value, tag);
+    if ptr.is_null() {
+        return String::new();
+    }
+    let text = String::from_utf8_lossy(std::slice::from_raw_parts(
+        light_str_ptr(ptr as *const c_void),
+        light_str_len(ptr as *const c_void),
+    ))
+    .to_string();
+    light_str_free(ptr as *mut c_void);
+    text
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn light_page_finish() -> *mut c_void {
+    // 页面结束时自动补齐未闭合的容器
+    unsafe {
+        while !PAGE.with(|page| page.borrow().open_containers.is_empty()) {
+            light_page_element_close();
+        }
+    }
     PAGE.with(|page| {
         let mut page = page.borrow_mut();
         let title = html_escape(&page.title);
@@ -225,18 +332,15 @@ pub unsafe extern "C" fn light_page_finish() -> *mut c_void {
         let icon = html_escape(&page.icon);
         let content = String::from_utf8_lossy(&page.content).to_string();
         let styles = String::from_utf8_lossy(&page.styles).to_string();
-        let (background, foreground) = if page.theme == "dark" {
-            ("#101418", "#e6edf3")
-        } else {
-            ("#ffffff", "#111827")
-        };
+        let dark = page.theme == "dark";
+        let base = elements::base_css(dark);
         let icon_link = if page.icon.is_empty() || page.icon == "none" {
             String::new()
         } else {
             format!("<link rel=\"icon\" href=\"{}\">\n", icon)
         };
         let html = format!(
-            "<!doctype html>\n<html lang=\"{lang}\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>{title}</title>\n{icon_link}<style>\nbody {{ margin: 0; padding: 2rem; background: {background}; color: {foreground}; font-family: system-ui, sans-serif; }}\n{styles}\n</style>\n</head>\n<body>\n{content}\n</body>\n</html>\n"
+            "<!doctype html>\n<html lang=\"{lang}\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>{title}</title>\n{icon_link}<style>\n{base}\n{styles}\n</style>\n</head>\n<body>\n{content}\n</body>\n</html>\n"
         );
         page.content.clear();
         page.styles.clear();
@@ -260,6 +364,71 @@ pub unsafe extern "C" fn light_web_request_path_v1(request: i64) -> i64 {
 pub unsafe extern "C" fn light_web_request_body_v1(request: i64) -> i64 {
     let request = &*(request as *const WebRequest);
     make_string(&request.body)
+}
+
+/// 读取查询串或表单参数：GET 读路径后的查询串，POST 读 urlencoded 请求体
+#[no_mangle]
+pub unsafe extern "C" fn light_web_request_param_v1(
+    request: i64,
+    name_ptr: *const u8,
+    name_len: i64,
+) -> i64 {
+    let name = string_from_ptr(name_ptr, name_len);
+    let req = &*(request as *const WebRequest);
+    let source = if req.body.is_empty() {
+        Some(req.query.clone())
+    } else {
+        Some(String::from_utf8_lossy(&req.body).to_string())
+    };
+    let Some(source) = source else {
+        return make_string(b"") as i64;
+    };
+    for pair in source.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (key, value) = match pair.split_once('=') {
+            Some((key, value)) => (key, value),
+            None => (pair, ""),
+        };
+        if form_decode(key) == name {
+            return make_string(form_decode(value).as_bytes()) as i64;
+        }
+    }
+    make_string(b"") as i64
+}
+
+/// 简单的百分号解码与加号还原
+fn form_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => {
+                out.push(b' ');
+                index += 1;
+            }
+            b'%' if index + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or("");
+                match u8::from_str_radix(hex, 16) {
+                    Ok(byte) => {
+                        out.push(byte);
+                        index += 3;
+                    }
+                    Err(_) => {
+                        out.push(bytes[index]);
+                        index += 1;
+                    }
+                }
+            }
+            other => {
+                out.push(other);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).to_string()
 }
 
 #[no_mangle]
@@ -294,7 +463,9 @@ fn respond_error(request: Request, status: u16, message: &str) {
 
 fn handle_request(mut request: Request) {
     let method = request.method().as_str().to_string();
-    let path = request.url().split('?').next().unwrap_or("/").to_string();
+    let url = request.url().to_string();
+    let path = url.split('?').next().unwrap_or("/").to_string();
+    let query = url.split_once('?').map(|(_, rest)| rest.to_string()).unwrap_or_default();
     let mut body = Vec::new();
     if request.as_reader().read_to_end(&mut body).is_err() {
         respond_error(request, 400, "读取请求失败");
@@ -354,6 +525,7 @@ fn handle_request(mut request: Request) {
     let web_request = WebRequest {
         method,
         path,
+        query,
         body,
         headers,
     };
@@ -393,7 +565,6 @@ pub unsafe extern "C" fn light_web_run_v1(port: i64) -> i64 {
     if !(1..=65535).contains(&port) {
         return -1;
     }
-    let _ = std::hint::black_box(lightrt::str_parts(ptr::null()));
     let address = format!("127.0.0.1:{}", port);
     let server = match Server::http(address.as_str()) {
         Ok(server) => server,

@@ -215,6 +215,20 @@ fn analyze_stmt(stmt: &Stmt, fname: &str, locals: &HashMap<String, Ty>,
             analyze_expr(value, fname, locals, env, cons);
         }
         Stmt::Expr(e) | Stmt::Style(e) => analyze_expr(e, fname, locals, env, cons),
+        Stmt::Element { text, attrs, body, .. } => {
+            if let Some(expr) = text {
+                analyze_expr(expr, fname, locals, env, cons);
+            }
+            for (_, expr) in attrs {
+                analyze_expr(expr, fname, locals, env, cons);
+            }
+            if let Some(block) = body {
+                for stmt in &block.stmts {
+                    analyze_stmt(stmt, fname, locals, env, cons);
+                }
+            }
+        }
+        Stmt::ElementEnd => {}
         Stmt::Print(values) => {
             for value in values {
                 analyze_expr(value, fname, locals, env, cons);

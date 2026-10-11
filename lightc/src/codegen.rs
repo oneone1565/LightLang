@@ -29,6 +29,8 @@ enum Ty {
     List,
     Dict,
     None,
+    /// 编译期类型未知（列表元素等），运行期由内建自行判定
+    Unknown,
 }
 
 impl From<ITy> for Ty {
@@ -55,6 +57,22 @@ impl Ty {
     fn is_float(self) -> bool { matches!(self, Ty::Float) }
 }
 
+/// 类型标注名称 -> 类型（推断环境用的 Ty）
+pub fn type_by_name(name: &str) -> Option<ITy> {
+    Some(match name {
+        "整数" => ITy::Int,
+        "浮点" => ITy::Float,
+        "字符串" => ITy::Str,
+        "布尔" => ITy::Bool,
+        "列表" | "数组" => ITy::List,
+        "元组" => ITy::Tuple(Vec::new()),
+        "字典" => ITy::Dict,
+        "空" => ITy::None,
+        "任意" => ITy::Unknown,
+        _ => return None,
+    })
+}
+
 struct Scope {
     vars: HashMap<String, (String, Ty)>, // name -> (alloca reg, type)
     owned: Vec<String>,                   // 拥有堆资源、需在作用域结束时释放的变量
@@ -69,13 +87,20 @@ struct LoopCtx {
 pub struct CodeGen<'a> {
     out: String,
     tmp: usize,
+    /// 短路分支标签编号
+    branch: usize,
     str_idx: usize,
     globals: Vec<String>,
     externs: HashSet<String>,
+    // 外部函数的标注：形参类型与返回类型；None 表示动态（靠运行期标签）
+    extern_param_types: HashMap<String, Vec<Option<ITy>>>,
+    extern_return_types: HashMap<String, ITy>,
     env: &'a typeinfer::TypeEnv,
     loops: Vec<LoopCtx>,
     deferred: Vec<String>,
     page_mode: bool,
+    /// 页面静态导出目标；None 表示只注册 HTTP 路由，不写文件
+    page_output: Option<String>,
     debug_assertions: bool,
     repl_line: Option<i64>,
     target_triple: String,
@@ -86,6 +111,16 @@ const RUNTIME_DECLS: &[&str] = &[
     "declare void @light_print_float(double)",
     "declare void @light_print_str(ptr, i64)",
     "declare void @light_print_newline()",
+    "declare ptr @light_argv()",
+    "declare void @light_eprint_str(ptr, i64)",
+    "declare i64 @light_mem_alloc(i64)",
+    "declare void @light_mem_free(i64)",
+    "declare i64 @light_mem_copy(i64, i64, i64)",
+    "declare void @light_mem_zero(i64, i64)",
+    "declare i64 @light_mem_load(i64)",
+    "declare void @light_mem_store(i64, i64)",
+    "declare i64 @light_mem_load8(i64)",
+    "declare void @light_mem_store8(i64, i64)",
     "declare void @light_print_bool(i64)",
     "declare void @light_print_value(i64, i32)",
     "declare void @light_print_array(ptr)",
@@ -100,6 +135,7 @@ const RUNTIME_DECLS: &[&str] = &[
     "declare i64 @light_web_request_path_v1(i64)",
     "declare i64 @light_web_request_body_v1(i64)",
     "declare i64 @light_web_request_header_v1(i64, ptr, i64)",
+    "declare i64 @light_web_request_param_v1(i64, ptr, i64)",
     "declare void @light_page_reset(ptr, i64, ptr, i64)",
     "declare void @light_page_set_lang(ptr, i64)",
     "declare void @light_page_set_theme(ptr, i64)",
@@ -108,6 +144,11 @@ const RUNTIME_DECLS: &[&str] = &[
     "declare void @light_page_append_int(i64)",
     "declare void @light_page_append_float(double)",
     "declare void @light_page_append_bool(i64)",
+    "declare void @light_page_element_begin(i32)",
+    "declare void @light_page_element_text(i64, i32)",
+    "declare void @light_page_element_attr(ptr, i64, i64, i32)",
+    "declare void @light_page_element_end()",
+    "declare void @light_page_element_close()",
     "declare ptr @light_page_finish()",
     "declare ptr @light_thread_spawn(ptr, i64)",
     "declare i64 @light_thread_join(ptr)",
@@ -132,6 +173,27 @@ const RUNTIME_DECLS: &[&str] = &[
     "declare ptr @light_str_from_utf8(ptr, i64)",
     "declare ptr @light_str_ptr(ptr)",
     "declare i64 @light_str_len(ptr)",
+    "declare i64 @light_str_cmp(ptr, ptr)",
+    "declare ptr @light_str_dup(ptr)",
+    "declare i64 @light_tagged(i64, i32)",
+    "declare i64 @light_untag(i64)",
+    "declare i32 @light_tag_of(i64)",
+    "declare i64 @light_dynamic_get(i64, i64)",
+    "declare i64 @light_dynamic_len(i64)",
+    "declare i1 @light_dynamic_contains(i64, i64, i32)",
+    "declare void @light_array_push_tag(ptr, i32, i64)",
+    "declare ptr @light_dynamic_to_text(i64, i32)",
+    "declare i32 @light_array_get_tag(ptr, i64)",
+    "declare i64 @light_dict_get(ptr, i32, i64)",
+    "declare i64 @light_dict_len(ptr)",
+    "declare i1 @light_dict_has(ptr, i32, i64)",
+    "declare i64 @light_dict_get_tag(ptr, i32, i64)",
+    "declare ptr @light_dict_get_text(ptr, i32, i64)",
+    "declare i64 @light_array_get_raw(ptr, i64)",
+    "declare ptr @light_array_get_text(ptr, i64)",
+    "declare i64 @light_array_tag_at(ptr, i64)",
+    "declare ptr @light_dict_keys(ptr)",
+    "declare ptr @light_read_all_stdin()",
     "declare ptr @light_str_concat(ptr, ptr)",
     "declare void @light_str_free(ptr)",
     "declare i64 @light_str_index(ptr, i64)",
@@ -193,17 +255,22 @@ impl<'a> CodeGen<'a> {
         target_triple: String,
         debug_assertions: bool,
         repl_line: Option<i64>,
+        page_output: Option<String>,
     ) -> Self {
         CodeGen {
             out: String::new(),
             tmp: 0,
+            branch: 0,
             str_idx: 0,
             globals: Vec::new(),
             externs: HashSet::new(),
+            extern_param_types: HashMap::new(),
+            extern_return_types: HashMap::new(),
             env,
             loops: Vec::new(),
             deferred: Vec::new(),
             page_mode: false,
+            page_output,
             debug_assertions,
             repl_line,
             target_triple,
@@ -223,6 +290,20 @@ impl<'a> CodeGen<'a> {
             }
         }
         out
+    }
+
+    /// 运行期才知道类型的值（列表元素）用高位标签携带类型，使用前先解标签
+    fn untag(&mut self, val: &str) -> String {
+        let r = self.fresh();
+        self.emit(&format!("  {} = call i64 @light_untag(i64 {})", r, val));
+        r
+    }
+
+    /// 取运行期标签
+    fn tag_of(&mut self, val: &str) -> String {
+        let r = self.fresh();
+        self.emit(&format!("  {} = call i32 @light_tag_of(i64 {})", r, val));
+        r
     }
 
     fn fresh(&mut self) -> String {
@@ -245,8 +326,11 @@ impl<'a> CodeGen<'a> {
     }
 
     fn i64_to_ptr(&mut self, v: &str) -> String {
+        // 先摘掉运行期标签再转指针：堆指针的高 8 位本来就是 0，
+        // 解标签对真实指针是空操作，对带标签的值才是必须的。
+        let u = self.untag(v);
         let r = self.fresh();
-        self.emit(&format!("  {} = inttoptr i64 {} to ptr", r, v));
+        self.emit(&format!("  {} = inttoptr i64 {} to ptr", r, u));
         r
     }
 
@@ -298,12 +382,50 @@ impl<'a> CodeGen<'a> {
     }
 
     fn value_as_i64(&mut self, val: &str, ty: &Ty) -> String {
+        if *ty == Ty::Unknown {
+            return self.untag(val);
+        }
         if ty.is_float() {
             let r = self.fresh();
             self.emit(&format!("  {} = bitcast double {} to i64", r, val));
             r
         } else {
             val.to_string()
+        }
+    }
+
+    /// 元素属性的值：统一按 i64 传递，浮点做 bitcast
+    /// （指针类值在 Light 的 ABI 里本来就是 i64）
+    fn tagged_i64(&mut self, val: &str, ty: &Ty) -> String {
+        self.value_as_i64(val, ty)
+    }
+
+    /// 把值按静态类型打上运行期标签，返回新的寄存器。
+    /// 编译期不知道类型的值本身已带标签，原样传出。
+    fn tag_value(&mut self, val: &str, ty: &Ty) -> String {
+        let raw = self.value_as_i64(val, ty);
+        if *ty == Ty::Unknown {
+            return raw;
+        }
+        let r = self.fresh();
+        self.emit(&format!(
+            "  {} = call i64 @light_tagged(i64 {}, i32 {})",
+            r,
+            raw,
+            Self::value_tag(ty)
+        ));
+        r
+    }
+
+    /// 表达式是否是「自己新建的临时值」：变量与下标读是借用，不能释放
+    fn is_temp(e: &Expr) -> bool {
+        !matches!(e, Expr::Ident(_) | Expr::Index { .. })
+    }
+
+    /// 释放表达式产生的临时值（变量、下标读不释放）
+    fn free_temp(&mut self, e: &Expr, val: &str, ty: &Ty) {
+        if Self::is_temp(e) {
+            self.free_value(val, ty);
         }
     }
 
@@ -317,6 +439,7 @@ impl<'a> CodeGen<'a> {
             Ty::Array | Ty::List => 5,
             Ty::Dict => 6,
             Ty::Tuple => 7,
+            Ty::Unknown => 8,
         }
     }
 
@@ -452,10 +575,22 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             }
         }
 
-        for (name, nargs) in &externs {
-            self.externs.insert(name.clone());
-            let params = (0..*nargs).map(|_| "i64").collect::<Vec<_>>().join(", ");
-            self.emit(&format!("declare i64 @{}({})", name, params));
+        for item in &program.items {
+            if let Item::Extern(e) = item {
+                self.externs.insert(e.name.clone());
+                // None 表示该形参是动态的，调用处要给实参打运行期标签
+                let tys: Vec<Option<ITy>> = e
+                    .param_types
+                    .iter()
+                    .map(|t| t.as_deref().and_then(type_by_name))
+                    .collect();
+                self.extern_param_types.insert(e.name.clone(), tys);
+                if let Some(rt) = e.return_type.as_deref().and_then(type_by_name) {
+                    self.extern_return_types.insert(e.name.clone(), rt);
+                }
+                let params = (0..e.params.len()).map(|_| "i64").collect::<Vec<_>>().join(", ");
+                self.emit(&format!("declare i64 @{}({})", e.name, params));
+            }
         }
         self.emit("");
 
@@ -544,11 +679,21 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             let reg = self.fresh();
             self.emit(&format!("  {} = alloca i64", reg));
             self.emit(&format!("  store i64 %p{}, ptr {}", i, reg));
+            // 显式标注优先，其次类型推断，最后默认整数
+            let annotated = f
+                .param_types
+                .get(i)
+                .cloned()
+                .flatten()
+                .and_then(|text| type_by_name(&text));
             let pty = self.env.param_types.get(&(f.name.clone(), i)).cloned();
-            let ty: Ty = pty.map(|t| t.into()).unwrap_or(Ty::Int);
+            let ty: Ty = annotated
+                .map(Ty::from)
+                .or_else(|| pty.map(|t| t.into()))
+                .unwrap_or(Ty::Int);
             scope.vars.insert(name.clone(), (reg, ty));
-            // 参数按 move 语义拥有：若参数是字符串/数组，由本函数负责释放
-            if ty.is_owned() {
+            // 参数语义：字符串按值传入（本函数负责释放），容器按引用借用（调用方负责）
+            if matches!(ty, Ty::Str) {
                 scope.owned.push(name.clone());
             }
         }
@@ -594,7 +739,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         }
         let p = self.i64_to_ptr(&reg);
         self.emit(&format!("  call void @light_throw(ptr {})", p));
-        if !matches!(expr, Expr::Ident(_)) {
+        if Self::is_temp(expr) {
             self.emit(&format!("  call void @light_str_free(ptr {})", p));
         }
         Ok(())
@@ -765,7 +910,18 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         // 1. 格式串：字面量直接用常量，其他取表达式的字符串内容
         let (fmt_ptr, fmt_len) = match first {
             Expr::Str(text) => {
-                let (gep, len) = self.emit_str_const(text);
+                // 格式串里没有占位符时，把后续参数按空格追加（贴近 print 的直觉）
+                let text = if !text.contains('{') && exprs.len() > 1 {
+                    let mut extended = text.to_string();
+                    for _ in exprs.iter().skip(1) {
+                        extended.push(' ');
+                        extended.push_str("{}");
+                    }
+                    extended
+                } else {
+                    text.to_string()
+                };
+                let (gep, len) = self.emit_str_const(&text);
                 let p = self.fresh();
                 self.emit(&format!("  {} = bitcast ptr {} to ptr", p, gep));
                 let l = self.fresh();
@@ -792,24 +948,29 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         // 2. 名字表：只对字符串字面量做编译期检查
         //    占位符内容若是标识符则查作用域，否则按表达式解析（与 Python f-string 一致）
         let mut owned_temps: Vec<(String, Ty)> = Vec::new();
-        let mut entries: Vec<(Option<String>, String, i32)> = Vec::new();
+        let mut entries: Vec<(Option<String>, String, i32, Option<String>)> = Vec::new();
         if let Expr::Str(text) = first {
             for name in Self::placeholder_names(text) {
-                let (raw, ty) = if Self::is_plain_identifier(&name) {
+                let (raw, ty, tag_reg) = if Self::is_plain_identifier(&name) {
                     let (slot, ty) = self
                         .lookup(scopes, &name)
                         .ok_or_else(|| format!("未定义变量：{}", name))?;
                     let value = self.load_value(&slot, ty.clone());
-                    (self.value_as_i64(&value, &ty), ty)
+                    // 变量的类型是静态已知的（列表元素变量例外）
+                    let tag_reg = if ty == Ty::Unknown { Some(self.tag_of(&value)) } else { None };
+                    (self.value_as_i64(&value, &ty), ty, tag_reg)
                 } else {
                     let expr = Self::parse_placeholder_expr(&name)?;
                     let (reg, ty) = self.gen_expr(&expr, scopes)?;
-                    if !matches!(expr, Expr::Ident(_)) && ty.is_owned() {
+                    if Self::is_temp(&expr) && ty.is_owned() {
                         owned_temps.push((reg.clone(), ty.clone()));
                     }
-                    (self.value_as_i64(&reg, &ty), ty)
+                    // 类型运行期才知道：标签随值走
+                    let tag_reg = if ty == Ty::Unknown { Some(self.tag_of(&reg)) } else { None };
+                    (self.value_as_i64(&reg, &ty), ty, tag_reg)
                 };
-                entries.push((Some(name), raw, Self::value_tag(&ty)));
+                let tag = tag_reg.as_ref().map(|_| 0).unwrap_or_else(|| Self::value_tag(&ty));
+                entries.push((Some(name), raw, tag, tag_reg));
             }
         }
         let name_count = entries.len();
@@ -817,28 +978,35 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         // 3. 位置参数
         for expr in exprs.iter().skip(1) {
             let (reg, ty) = self.gen_expr(expr, scopes)?;
-            if !matches!(expr, Expr::Ident(_)) && ty.is_owned() {
+            if Self::is_temp(expr) && ty.is_owned() {
                 owned_temps.push((reg.clone(), ty.clone()));
             }
+            // 类型运行期才知道：标签随值走
+            let tag_reg = if ty == Ty::Unknown { Some(self.tag_of(&reg)) } else { None };
             let raw = self.value_as_i64(&reg, &ty);
-            entries.push((None, raw, Self::value_tag(&ty)));
+            let tag = tag_reg.as_ref().map(|_| 0).unwrap_or_else(|| Self::value_tag(&ty));
+            entries.push((None, raw, tag, tag_reg));
         }
         let total = entries.len();
 
         // 4. 参数表
         let arr = self.fresh();
         self.emit(&format!("  {} = call ptr @light_array_new(i64 {})", arr, total));
-        for (index, (_, raw, tag)) in entries.iter().enumerate() {
+        for (index, (_, raw, tag, tag_reg)) in entries.iter().enumerate() {
             let raw = self.value_as_i64(raw, &Ty::Int);
+            let tag_value = match tag_reg {
+                Some(reg) => reg.clone(),
+                None => tag.to_string(),
+            };
             self.emit(&format!(
                 "  call void @light_array_set_tag(ptr {}, i64 {}, i32 {}, i64 {})",
-                arr, index, tag, raw
+                arr, index, tag_value, raw
             ));
         }
 
         // 5. 名字表常量
         let mut blob = String::new();
-        for (name, _, _) in entries.iter().take(name_count) {
+        for (name, _, _, _) in entries.iter().take(name_count) {
             if let Some(name) = name {
                 blob.push_str(name);
                 blob.push('\0');
@@ -867,6 +1035,80 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         Ok(result)
     }
 
+    /// 页面元素：按顺序调用运行时的元素构建接口
+    fn gen_page_element(
+        &mut self,
+        kind: &str,
+        text: Option<&Expr>,
+        attrs: &[(String, Expr)],
+        body: Option<&Block>,
+        scopes: &mut Vec<Scope>,
+    ) -> Result<(), String> {
+        if !self.page_mode {
+            return Err(format!("{} 只能写在页面代码块中", kind));
+        }
+        let id = element_kind_id(kind)?;
+        self.emit(&format!("  call void @light_page_element_begin(i32 {})", id));
+        if let Some(expr) = text {
+            let (reg, ty) = self.gen_expr(expr, scopes)?;
+            let raw = self.tagged_i64(&reg, &ty);
+            self.emit(&format!(
+                "  call void @light_page_element_text(i64 {}, i32 {})",
+                raw,
+                Self::value_tag(&ty)
+            ));
+            if Self::is_temp(expr) {
+                self.free_value(&reg, &ty);
+            }
+        }
+        for (key, expr) in attrs {
+            let (key_ptr, key_len) = self.emit_str_const(key);
+            // 属性值可以直接写单词：样式=主要、方式=post、值=m
+            // 已定义的标识符仍按变量处理
+            let bare_word = matches!(expr, Expr::Ident(name) if self.lookup(scopes, name).is_none());
+            if bare_word {
+                let name = match expr {
+                    Expr::Ident(name) => name.clone(),
+                    _ => unreachable!(),
+                };
+                let (gep, len) = self.emit_str_const(&name);
+                let text = self.fresh();
+                self.emit(&format!(
+                    "  {} = call ptr @light_str_from_utf8(ptr {}, i64 {})",
+                    text, gep, len
+                ));
+                let raw = self.fresh();
+                self.emit(&format!("  {} = ptrtoint ptr {} to i64", raw, text));
+                self.emit(&format!(
+                    "  call void @light_page_element_attr(ptr {}, i64 {}, i64 {}, i32 2)",
+                    key_ptr, key_len, raw
+                ));
+                self.emit(&format!("  call void @light_str_free(ptr {})", text));
+                continue;
+            }
+            let (reg, ty) = self.gen_expr(expr, scopes)?;
+            let raw = self.tagged_i64(&reg, &ty);
+            self.emit(&format!(
+                "  call void @light_page_element_attr(ptr {}, i64 {}, i64 {}, i32 {})",
+                key_ptr,
+                key_len,
+                raw,
+                Self::value_tag(&ty)
+            ));
+            if Self::is_temp(expr) {
+                self.free_value(&reg, &ty);
+            }
+        }
+        self.emit("  call void @light_page_element_end()");
+        if let Some(block) = body {
+            for stmt in &block.stmts {
+                self.gen_stmt(stmt, scopes)?;
+            }
+            self.emit("  call void @light_page_element_close()");
+        }
+        Ok(())
+    }
+
     fn gen_page_print(&mut self, expr: &Expr, scopes: &mut Vec<Scope>) -> Result<(), String> {
         let (reg, ty) = self.gen_expr(expr, scopes)?;
         match ty {
@@ -877,7 +1119,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 let len = self.fresh();
                 self.emit(&format!("  {} = call i64 @light_str_len(ptr {})", len, p));
                 self.emit(&format!("  call void @light_page_append_str(ptr {}, i64 {})", data, len));
-                if !matches!(expr, Expr::Ident(_)) {
+                if Self::is_temp(expr) {
                     self.emit(&format!("  call void @light_str_free(ptr {})", p));
                 }
             }
@@ -935,6 +1177,46 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         let wrapper = self.out.clone();
         self.out = saved;
         self.deferred.push(wrapper);
+        // 静态导出：直接调用页面函数，把 HTML 写到磁盘。
+        // 光有路由注册不够——不起服务时也要能拿到 HTML 文件。
+        if let Some(output) = self.page_output.clone() {
+            let zero = self.fresh();
+            self.emit(&format!("  {} = add i64 0, 0", zero));
+            let page = self.fresh();
+            self.emit(&format!("  {} = call i64 @{}(i64 {})", page, symbol, zero));
+            let page_ptr = self.fresh();
+            self.emit(&format!("  {} = inttoptr i64 {} to ptr", page_ptr, page));
+            let data = self.fresh();
+            self.emit(&format!("  {} = call ptr @light_str_ptr(ptr {})", data, page_ptr));
+            let len = self.fresh();
+            self.emit(&format!("  {} = call i64 @light_str_len(ptr {})", len, page_ptr));
+            // light_file_write 收的是 LightStr 结构指针，路径也要先转成 LightStr
+            let (path_bytes, path_len) = self.emit_str_const(&output);
+            let path_str = self.fresh();
+            self.emit(&format!(
+                "  {} = call ptr @light_str_from_utf8(ptr {}, i64 {})",
+                path_str, path_bytes, path_len
+            ));
+            let ok = self.fresh();
+            self.emit(&format!(
+                "  {} = call i1 @light_file_write(ptr {}, ptr {})",
+                ok, path_str, page_ptr
+            ));
+            let msg = self.fresh();
+            self.emit(&format!("  {} = call ptr @light_str_from_utf8(ptr {}, i64 {})", msg, data, len));
+            let written = self.fresh();
+            self.emit(&format!("  {} = ptrtoint ptr {} to i64", written, msg));
+            let n1 = self.fresh();
+            self.emit(&format!("  {} = add i64 0, 0", n1));
+            self.emit(&format!(
+                "  call void @light_print_value(i64 {}, i32 2)",
+                written
+            ));
+            self.emit("  call void @light_print_newline()");
+            self.emit(&format!("  call void @light_str_free(ptr {})", page_ptr));
+            let _ = (n1, ok);
+        }
+
         let (path_ptr, path_len) = self.emit_str_const("/");
         let status = self.fresh();
         self.emit(&format!(
@@ -977,7 +1259,24 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 if self.gen_page_setting(name, value, scopes)? {
                     return Ok(());
                 }
+                // 变量之间赋值：容器/字典转移所有权；字符串不可变，复制一份
+                // （转移会让源变量变成悬垂别名：之后给目标赋值时 free 掉的就是源还在引用的内存）
+                if let Expr::Ident(src) = value {
+                    if let Some((_, sty)) = self.lookup(scopes, src) {
+                        if sty.is_owned() && sty != Ty::Str {
+                            Self::mark_moved(scopes, src);
+                        }
+                    }
+                }
                 let (val_reg, ty) = self.gen_expr(value, scopes)?;
+                let val_reg = if matches!(value, Expr::Ident(_)) && ty == Ty::Str {
+                    let sp = self.i64_to_ptr(&val_reg);
+                    let d = self.fresh();
+                    self.emit(&format!("  {} = call ptr @light_str_dup(ptr {})", d, sp));
+                    self.ptr_to_i64(&d)
+                } else {
+                    val_reg
+                };
                 let reg = self.fresh();
                 self.emit(&format!("  {} = alloca i64", reg));
                 self.store_value(&reg, &val_reg, ty);
@@ -994,13 +1293,41 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                             return Ok(());
                         }
                         let old_ty = self.lookup(scopes, name).map(|(_, ty)| ty);
+                        // 变量之间赋值：容器/字典转移所有权，字符串复制
+                        if let Expr::Ident(src) = value {
+                            if let Some((_, sty)) = self.lookup(scopes, src) {
+                                if sty.is_owned() && sty != Ty::Str {
+                                    Self::mark_moved(scopes, src);
+                                }
+                            }
+                        }
                         let (val_reg, new_ty) = self.gen_expr(value, scopes)?;
+                        let val_reg = if matches!(value, Expr::Ident(_)) && new_ty == Ty::Str {
+                            let sp0 = self.i64_to_ptr(&val_reg);
+                            let d0 = self.fresh();
+                            self.emit(&format!("  {} = call ptr @light_str_dup(ptr {})", d0, sp0));
+                            self.ptr_to_i64(&d0)
+                        } else {
+                            val_reg
+                        };
                         if let Some(old_ty) = old_ty {
                             if old_ty.is_owned() {
                                 self.free_var(scopes, name);
                                 Self::mark_moved(scopes, name);
                             }
                             let (reg, _) = self.lookup(scopes, name).unwrap();
+                            let val_reg =
+                                if new_ty == Ty::Unknown && old_ty != Ty::Unknown {
+                                    self.untag(&val_reg)
+                                } else {
+                                    val_reg
+                                };
+                            let new_ty =
+                                if new_ty == Ty::Unknown && old_ty != Ty::Unknown {
+                                    old_ty
+                                } else {
+                                    new_ty
+                                };
                             self.store_value(reg, &val_reg, new_ty);
                             let scope = scopes.last_mut().unwrap();
                             if let Some((_, ref mut t)) = scope.vars.get_mut(name) {
@@ -1022,20 +1349,39 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                     }
                     Expr::Index { arr, idx } => {
                         let (arr_reg, arr_ty) = self.gen_expr(arr, scopes)?;
-                        if !matches!(arr_ty, Ty::Array | Ty::List) {
-                            return Err("只能对数组或列表使用索引赋值".into());
-                        }
-                        let (idx_reg, _) = self.gen_expr(idx, scopes)?;
+                        let (idx_reg, idx_ty) = self.gen_expr(idx, scopes)?;
                         let (val_reg, vty) = self.gen_expr(value, scopes)?;
                         let val_i64 = self.value_as_i64(&val_reg, &vty);
                         let ap = self.i64_to_ptr(&arr_reg);
-                        self.emit(&format!(
-                            "  call void @light_array_set_copy_tag(ptr {}, i64 {}, i32 {}, i64 {})",
-                            ap,
-                            idx_reg,
-                            Self::value_tag(&vty),
-                            val_i64
-                        ));
+                        match arr_ty {
+                            Ty::Array | Ty::List => {
+                                self.emit(&format!(
+                                    "  call void @light_array_set_copy_tag(ptr {}, i64 {}, i32 {}, i64 {})",
+                                    ap,
+                                    idx_reg,
+                                    Self::value_tag(&vty),
+                                    val_i64
+                                ));
+                            }
+                            Ty::Dict => {
+                                // 字典按键写入：键与值都带上标签
+                                let key_i64 = self.value_as_i64(&idx_reg, &idx_ty);
+                                self.emit(&format!(
+                                    "  call void @light_dict_set(ptr {}, i32 {}, i64 {}, i32 {}, i64 {})",
+                                    ap,
+                                    Self::value_tag(&idx_ty),
+                                    key_i64,
+                                    Self::value_tag(&vty),
+                                    val_i64
+                                ));
+                                if !matches!(idx.as_ref(), Expr::Ident(_)) {
+                                    self.free_value(&idx_reg, &idx_ty);
+                                }
+                            }
+                            _ => {
+                                return Err("只能对数组、列表或字典使用索引赋值".into());
+                            }
+                        }
                         if !matches!(arr.as_ref(), Expr::Ident(_)) {
                             self.free_value(&arr_reg, &arr_ty);
                         }
@@ -1052,11 +1398,20 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             Stmt::Style(expr) if self.page_mode => {
                 let (reg, data, len) = self.gen_string_parts(expr, scopes)?;
                 self.emit(&format!("  call void @light_page_append_style(ptr {}, i64 {})", data, len));
-                if !matches!(expr, Expr::Ident(_)) {
+                if Self::is_temp(expr) {
                     self.free_value(&reg, &Ty::Str);
                 }
             }
             Stmt::Style(_) => return Err("样式只能写在页面代码块中".into()),
+            Stmt::Element { kind, text, attrs, body } => {
+                self.gen_page_element(kind, text.as_ref(), attrs, body.as_ref(), scopes)?;
+            }
+            Stmt::ElementEnd => {
+                if !self.page_mode {
+                    return Err("结束只能写在页面代码块中".into());
+                }
+                self.emit("  call void @light_page_element_close()");
+            }
             Stmt::Print(exprs) if self.page_mode => {
                 if Self::print_needs_format(exprs) {
                     let text = self.gen_format_string(exprs, scopes)?;
@@ -1084,6 +1439,15 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 let e = &exprs[0];
                 let (reg, ty) = self.gen_expr(e, scopes)?;
                 match ty {
+                    Ty::Unknown => {
+                        let v = self.untag(&reg);
+                        let t = self.tag_of(&reg);
+                        self.emit(&format!(
+                            "  call void @light_print_value(i64 {}, i32 {})",
+                            v, t
+                        ));
+                        self.emit("  call void @light_print_newline()");
+                    }
                     Ty::Int => {
                         self.emit(&format!("  call void @light_print_int(i64 {})", reg));
                         self.emit("  call void @light_print_newline()");
@@ -1184,7 +1548,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             Stmt::For { var, iter, body } => {
                 // 对于 var 在 迭代:  => 把迭代当作数组，按下标遍历
                 let (iter_reg, iter_ty) = self.gen_expr(iter, scopes)?;
-                if iter_ty != Ty::Array {
+                if !matches!(iter_ty, Ty::Array | Ty::List) {
                     return Err("for-in 只能遍历数组（用 范围(n) 生成序列）".into());
                 }
                 let ap = self.i64_to_ptr(&iter_reg);
@@ -1341,6 +1705,15 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         self.emit(&format!("  {} = call ptr @light_array_new(i64 {})", arr, len));
         for (i, (item, reg)) in items.iter().zip(item_regs.iter()).enumerate() {
             let value = self.value_as_i64(reg, &item_tys[i]);
+            // 类型运行期才知道的元素：用运行期标签写入
+            if item_tys[i] == Ty::Unknown {
+                let t = self.tag_of(reg);
+                self.emit(&format!(
+                    "  call void @light_array_set_tag(ptr {}, i64 {}, i32 {}, i64 {})",
+                    arr, i, t, value
+                ));
+                continue;
+            }
             self.emit(&format!(
                 "  call void @light_array_set_copy_tag(ptr {}, i64 {}, i32 {}, i64 {})",
                 arr,
@@ -1348,7 +1721,14 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 Self::value_tag(&item_tys[i]),
                 value
             ));
-            if !matches!(item, Expr::Ident(_)) {
+            if let Expr::Ident(n) = item {
+                // 变量放进列表字面量：所有权转给新列表
+                if item_tys[i].is_owned() {
+                    Self::mark_moved(scopes, n);
+                }
+            } else if matches!(item_tys[i], Ty::Str) {
+                // 只有字符串是被复制进列表的（set_copy_tag 只复制字符串），
+                // 容器是按引用存的：这里再释放就是提前 free，后面访问会悬垂。
                 self.free_value(reg, &item_tys[i]);
             }
         }
@@ -1396,12 +1776,22 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                     let (value_reg, value_ty) = self.gen_expr(value, scopes)?;
                     let key_value = self.value_as_i64(&key_reg, &key_ty);
                     let value_value = self.value_as_i64(&value_reg, &value_ty);
+                    let key_tag = if key_ty == Ty::Unknown {
+                        self.tag_of(&key_reg)
+                    } else {
+                        Self::value_tag(&key_ty).to_string()
+                    };
+                    let value_tag = if value_ty == Ty::Unknown {
+                        self.tag_of(&value_reg)
+                    } else {
+                        Self::value_tag(&value_ty).to_string()
+                    };
                     self.emit(&format!(
                         "  call void @light_dict_set(ptr {}, i32 {}, i64 {}, i32 {}, i64 {})",
                         dict,
-                        Self::value_tag(&key_ty),
+                        key_tag,
                         key_value,
-                        Self::value_tag(&value_ty),
+                        value_tag,
                         value_value
                     ));
                     if !matches!(key, Expr::Ident(_)) {
@@ -1480,20 +1870,9 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 use BinOp::*;
                 match op {
                     And | Or => {
-                        // 非短路：两侧都求值，然后做逻辑与/或
-                        let (lr, lt) = self.gen_expr(lhs, scopes)?;
-                        let (rr, rt) = self.gen_expr(rhs, scopes)?;
-                        let lb = self.gen_to_i1(&lr, lt);
-                        let rb = self.gen_to_i1(&rr, rt);
-                        let r1 = self.fresh();
-                        if matches!(op, And) {
-                            self.emit(&format!("  {} = and i1 {}, {}", r1, lb, rb));
-                        } else {
-                            self.emit(&format!("  {} = or i1 {}, {}", r1, lb, rb));
-                        }
-                        let r2 = self.fresh();
-                        self.emit(&format!("  {} = zext i1 {} to i64", r2, r1));
-                        Ok((r2, Ty::Bool))
+                        // 短路求值：左侧为假（或为真）时右侧完全不求值。
+                        // 这样 `j < 长度(行) 且 行[j] == 33` 之类的守卫条件才安全。
+                        self.gen_short_circuit(*op, lhs, rhs, scopes)
                     }
                     Add | Sub | Mul | Div | FloorDiv | Mod | Pow => {
                         self.gen_arith(*op, lhs, rhs, scopes)
@@ -1508,7 +1887,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             }
             Expr::Index { arr, idx } => {
                 let (arr_reg, arr_ty) = self.gen_expr(arr, scopes)?;
-                let (idx_reg, _) = self.gen_expr(idx, scopes)?;
+                let (idx_reg, idx_ty) = self.gen_expr(idx, scopes)?;
                 match arr_ty {
                     Ty::Array | Ty::List => {
                         let ap = self.i64_to_ptr(&arr_reg);
@@ -1517,24 +1896,78 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                             "  {} = call i64 @light_array_get(ptr {}, i64 {})",
                             r, ap, idx_reg
                         ));
+                        let t = self.fresh();
+                        self.emit(&format!(
+                            "  {} = call i32 @light_array_get_tag(ptr {}, i64 {})",
+                            t, ap, idx_reg
+                        ));
                         if !matches!(arr.as_ref(), Expr::Ident(_)) {
                             self.emit(&format!("  call void @light_array_free(ptr {})", ap));
                         }
-                        Ok((r, Ty::Int))
+                        // 列表元素的类型在编译期不可知，打上标签交给运行期处理
+                        let tagged = self.fresh();
+                        self.emit(&format!(
+                            "  {} = call i64 @light_tagged(i64 {}, i32 {})",
+                            tagged, r, t
+                        ));
+                        Ok((tagged, Ty::Unknown))
                     }
                     Ty::Str => {
                         let sp = self.i64_to_ptr(&arr_reg);
+                        let idx = if idx_ty.is_float() {
+                            let b = self.fresh();
+                            self.emit(&format!("  {} = bitcast double {} to i64", b, idx_reg));
+                            b
+                        } else {
+                            self.value_as_i64(&idx_reg, &idx_ty)
+                        };
                         let r = self.fresh();
                         self.emit(&format!(
                             "  {} = call i64 @light_str_index(ptr {}, i64 {})",
-                            r, sp, idx_reg
+                            r, sp, idx
                         ));
                         if !matches!(arr.as_ref(), Expr::Ident(_)) {
                             self.emit(&format!("  call void @light_str_free(ptr {})", sp));
                         }
                         Ok((r, Ty::Int))
                     }
-                    _ => Err("只能对数组或字符串使用索引".into()),
+                    Ty::Dict => {
+                        // 字典取值统一返回文本形式
+                        let dp = self.i64_to_ptr(&arr_reg);
+                        let key_i64 = self.value_as_i64(&idx_reg, &idx_ty);
+                        let r = self.fresh();
+                        self.emit(&format!(
+                            "  {} = call ptr @light_dict_get_text(ptr {}, i32 {}, i64 {})",
+                            r,
+                            dp,
+                            Self::value_tag(&idx_ty),
+                            key_i64
+                        ));
+                        if !matches!(arr.as_ref(), Expr::Ident(_)) {
+                            self.emit(&format!("  call void @light_dict_free(ptr {})", dp));
+                        }
+                        Ok((self.ptr_to_i64(&r), Ty::Str))
+                    }
+                    Ty::Unknown => {
+                        // 容器种类运行期才知道：列表/字典/字符串统一分派
+                        let idx_i = if idx_ty.is_float() {
+                            let b = self.fresh();
+                            self.emit(&format!("  {} = bitcast double {} to i64", b, idx_reg));
+                            b
+                        } else {
+                            self.value_as_i64(&idx_reg, &idx_ty)
+                        };
+                        let r = self.fresh();
+                        self.emit(&format!(
+                            "  {} = call i64 @light_dynamic_get(i64 {}, i64 {})",
+                            r, arr_reg, idx_i
+                        ));
+                        if !matches!(arr.as_ref(), Expr::Ident(_)) {
+                            // 带标签的值无需释放
+                        }
+                        Ok((r, Ty::Unknown))
+                    }
+                    _ => Err("只能对数组、列表、字符串或字典使用索引".into()),
                 }
             }
             Expr::ArrayNew(len_expr) => {
@@ -1553,19 +1986,19 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         let (lr, lt) = self.gen_expr(lhs, scopes)?;
         let (rr, rt) = self.gen_expr(rhs, scopes)?;
 
-        // 字符串拼接
+        // 字符串拼接（未知的一侧先解标签：其值就是字符串指针）
         if lt == Ty::Str || rt == Ty::Str {
-            if lt != Ty::Str || rt != Ty::Str {
-                return Err("字符串只能与字符串拼接".into());
-            }
+            let lr = if lt == Ty::Unknown { self.untag(&lr) } else { lr };
+            let rr = if rt == Ty::Unknown { self.untag(&rr) } else { rr };
             let lp = self.i64_to_ptr(&lr);
             let rp = self.i64_to_ptr(&rr);
             let cp = self.fresh();
             self.emit(&format!("  {} = call ptr @light_str_concat(ptr {}, ptr {})", cp, lp, rp));
-            if !matches!(lhs, Expr::Ident(_)) {
+            // 只释放自己新建的字符串；类型未知的一侧是容器里的借用值，不能释放
+            if lt == Ty::Str && Self::is_temp(lhs) {
                 self.emit(&format!("  call void @light_str_free(ptr {})", lp));
             }
-            if !matches!(rhs, Expr::Ident(_)) {
+            if rt == Ty::Str && Self::is_temp(rhs) {
                 self.emit(&format!("  call void @light_str_free(ptr {})", rp));
             }
             let r = self.ptr_to_i64(&cp);
@@ -1648,11 +2081,163 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         }
     }
 
+    /// 短路求值的 与/或：用 alloca 存放结果，分支汇合后再读回
+    fn gen_short_circuit(
+        &mut self,
+        op: BinOp,
+        lhs: &Expr,
+        rhs: &Expr,
+        scopes: &mut Vec<Scope>,
+    ) -> Result<(String, Ty), String> {
+        let n = self.branch;
+        self.branch += 1;
+        let slot = self.fresh();
+        self.emit(&format!("  {} = alloca i64", slot));
+        // 与的初值是 0，或的初值是 1（左侧成立时右侧不求值，直接用初值）
+        let init = if matches!(op, BinOp::Or) { 1 } else { 0 };
+        self.emit(&format!("  store i64 {}, ptr {}", init, slot));
+        let (lr, lt) = self.gen_expr(lhs, scopes)?;
+        let lb = self.gen_to_i1(&lr, lt);
+        let rhs_label = format!("sc_rhs{}", n);
+        let end_label = format!("sc_end{}", n);
+        // 与：左假直接得 0；或：左真直接得 1
+        let (true_label, false_label) = match op {
+            BinOp::And => (&rhs_label, &end_label),
+            _ => (&end_label, &rhs_label),
+        };
+        self.emit(&format!(
+            "  br i1 {}, label %{}, label %{}",
+            lb, true_label, false_label
+        ));
+        self.emit(&format!("{}:", rhs_label));
+        let (rr, rt) = self.gen_expr(rhs, scopes)?;
+        let rb = self.gen_to_i1(&rr, rt);
+        let rbi = self.fresh();
+        self.emit(&format!("  {} = zext i1 {} to i64", rbi, rb));
+        self.emit(&format!("  store i64 {}, ptr {}", rbi, slot));
+        self.emit(&format!("  br label %{}", end_label));
+        self.emit(&format!("{}:", end_label));
+        let out = self.fresh();
+        self.emit(&format!("  {} = load i64, ptr {}", out, slot));
+        Ok((out, Ty::Bool))
+    }
+
+    /// 两边类型都是「运行期才知道」时，按标签在运行期分派：
+    /// 两个都是字符串就走字符串运算，否则走整数运算。
+    /// 用 phi 汇合两条路径的结果。
+    fn gen_dyn_binop(
+        &mut self,
+        cmp_pred: Option<&str>,
+        lr: &str,
+        rr: &str,
+    ) -> Result<(String, Ty), String> {
+        let lp = self.untag(lr);
+        let rp = self.untag(rr);
+        let lt = self.tag_of(lr);
+        let rt = self.tag_of(rr);
+        let c1 = self.fresh();
+        self.emit(&format!("  {} = icmp eq i32 {}, 2", c1, lt));
+        let c2 = self.fresh();
+        self.emit(&format!("  {} = icmp eq i32 {}, 2", c2, rt));
+        let both = self.fresh();
+        self.emit(&format!("  {} = and i1 {}, {}", both, c1, c2));
+        let n = self.branch;
+        self.branch += 1;
+        let str_label = format!("dynstr{}", n);
+        let int_label = format!("dynint{}", n);
+        let merge = format!("dynend{}", n);
+        self.emit(&format!(
+            "  br i1 {}, label %{}, label %{}",
+            both, str_label, int_label
+        ));
+        self.emit(&format!("{}:", str_label));
+        let out = self.fresh();
+        match cmp_pred {
+            Some(pred) => {
+                let cmp = self.fresh();
+                self.emit(&format!(
+                    "  {} = call i64 @light_str_cmp(ptr {}, ptr {})",
+                    cmp, lp, rp
+                ));
+                let flag = self.fresh();
+                self.emit(&format!("  {} = icmp {} i64 {}, 0", flag, pred, cmp));
+                self.emit(&format!("  {} = zext i1 {} to i64", out, flag));
+            }
+            None => {
+                let cp = self.fresh();
+                self.emit(&format!(
+                    "  {} = call ptr @light_str_concat(ptr {}, ptr {})",
+                    cp, lp, rp
+                ));
+                self.emit(&format!("  {} = ptrtoint ptr {} to i64", out, cp));
+            }
+        }
+        self.emit(&format!("  br label %{}", merge));
+        self.emit(&format!("{}:", int_label));
+        let out2 = self.fresh();
+        match cmp_pred {
+            Some(pred) => {
+                self.emit(&format!("  {} = icmp {} i64 {}, {}", out2, pred, lp, rp));
+            }
+            None => {
+                self.emit(&format!("  {} = add i64 {}, {}", out2, lp, rp));
+            }
+        }
+        self.emit(&format!("  br label %{}", merge));
+        self.emit(&format!("{}:", merge));
+        let res = self.fresh();
+        self.emit(&format!(
+            "  {} = phi i64 [ %{}, %{} ], [ %{}, %{} ]",
+            res, out, str_label, out2, int_label
+        ));
+        let ty = if cmp_pred.is_some() { Ty::Bool } else { Ty::Int };
+        Ok((res, ty))
+    }
+
     /// 比较运算（含浮点）
     fn gen_cmp(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr,
               scopes: &mut Vec<Scope>) -> Result<(String, Ty), String> {
         let (lr, lt) = self.gen_expr(lhs, scopes)?;
         let (rr, rt) = self.gen_expr(rhs, scopes)?;
+        // 两边类型都是运行期才知道：按标签分派
+        if lt == Ty::Unknown && rt == Ty::Unknown {
+            let pred = match op {
+                BinOp::Eq => "eq",
+                BinOp::Neq => "ne",
+                BinOp::Lt => "slt",
+                BinOp::Gt => "sgt",
+                BinOp::Le => "sle",
+                BinOp::Ge => "sge",
+                _ => "eq",
+            };
+            return self.gen_dyn_binop(Some(pred), &lr, &rr);
+        }
+        // 字符串按内容比较（LightStr 是指针，直接比 i64 只会比地址）
+        if lt == Ty::Str || rt == Ty::Str {
+            let lr = if lt == Ty::Unknown { self.untag(&lr) } else { lr };
+            let rr = if rt == Ty::Unknown { self.untag(&rr) } else { rr };
+            let lp = self.i64_to_ptr(&lr);
+            let rp = self.i64_to_ptr(&rr);
+            let cmp = self.fresh();
+            self.emit(&format!(
+                "  {} = call i64 @light_str_cmp(ptr {}, ptr {})",
+                cmp, lp, rp
+            ));
+            let flag = self.fresh();
+            let pred = match op {
+                BinOp::Eq => "eq",
+                BinOp::Neq => "ne",
+                BinOp::Lt => "slt",
+                BinOp::Gt => "sgt",
+                BinOp::Le => "sle",
+                BinOp::Ge => "sge",
+                _ => unreachable!(),
+            };
+            self.emit(&format!("  {} = icmp {} i64 {}, 0", flag, pred, cmp));
+            let out = self.fresh();
+            self.emit(&format!("  {} = zext i1 {} to i64", out, flag));
+            return Ok((out, Ty::Bool));
+        }
         let is_float = lt.is_float() || rt.is_float();
         let r = self.fresh();
         if is_float {
@@ -1750,22 +2335,243 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         Ok((result, Ty::Int))
     }
 
+    /// 页面元素类型码：与 lightweb/src/elements.rs 的 KIND_* 一一对应
+    fn web_element_kind(name: &str) -> Option<i32> {
+        Some(match name {
+            "标题" => 0,
+            "段落" => 1,
+            "按钮" => 2,
+            "链接" => 3,
+            "图片" => 4,
+            "输入框" => 5,
+            "文本域" => 6,
+            "复选框" => 7,
+            "单选框" => 8,
+            "下拉框" => 9,
+            "列表" => 10,
+            "表格" => 11,
+            "分隔线" => 12,
+            "卡片" => 13,
+            "徽章" => 14,
+            "进度条" => 15,
+            "代码块" => 16,
+            "提示框" => 17,
+            "容器" => 18,
+            _ => return None,
+        })
+    }
+
+    /// 把值按 light_page_* 期望的 (值, 标签) 形式传参；字符串标签固定为 2
+    fn gen_web_value(&mut self, arg: &Expr, scopes: &mut Vec<Scope>) -> Result<(String, i32), String> {
+        let (reg, ty) = self.gen_expr(arg, scopes)?;
+        let tag = Self::value_tag(&ty);
+        Ok((reg, tag))
+    }
+
+    /// 页面构建：页面重置 / 页面语言 / 页面主题 / 追加样式 / 页元素* 系列
+    fn gen_web_page(&mut self, name: &str, args: &[Expr], scopes: &mut Vec<Scope>) -> Result<(String, Ty), String> {
+        match name {
+            "页面重置" => {
+                if args.len() != 2 {
+                    return Err("页面重置 需要标题与图标两个参数".into());
+                }
+                let (title_reg, title_data, title_len) = self.gen_string_parts(&args[0], scopes)?;
+                let (icon_reg, icon_data, icon_len) = self.gen_string_parts(&args[1], scopes)?;
+                self.emit(&format!(
+                    "  call void @light_page_reset(ptr {}, i64 {}, ptr {}, i64 {})",
+                    title_data, title_len, icon_data, icon_len
+                ));
+                self.free_value(&title_reg, &Ty::Str);
+                self.free_value(&icon_reg, &Ty::Str);
+                Ok((String::new(), Ty::None))
+            }
+            "页面语言" | "页面主题" | "追加样式" => {
+                if args.len() != 1 {
+                    return Err(format!("{} 需要一个字符串参数", name));
+                }
+                let (reg, data, len) = self.gen_string_parts(&args[0], scopes)?;
+                let fn_name = match name {
+                    "页面语言" => "light_page_set_lang",
+                    "页面主题" => "light_page_set_theme",
+                    _ => "light_page_append_style",
+                };
+                self.emit(&format!("  call void @{}(ptr {}, i64 {})", fn_name, data, len));
+                self.free_value(&reg, &Ty::Str);
+                Ok((String::new(), Ty::None))
+            }
+            "页元素开始" => {
+                if args.len() != 1 {
+                    return Err("页元素开始 需要一个元素名".into());
+                }
+                let Expr::Str(kind) = &args[0] else {
+                    return Err("页元素开始 的参数必须是元素名字符串".into());
+                };
+                let Some(code) = Self::web_element_kind(kind) else {
+                    return Err(format!("未知的页面元素：{}", kind));
+                };
+                self.emit(&format!("  call void @light_page_element_begin(i32 {})", code));
+                Ok((String::new(), Ty::None))
+            }
+            "页元素文本" => {
+                if args.len() != 1 {
+                    return Err("页元素文本 需要一个值参数".into());
+                }
+                let (value, tag) = self.gen_web_value(&args[0], scopes)?;
+                self.emit(&format!(
+                    "  call void @light_page_element_text(i64 {}, i32 {})",
+                    value, tag
+                ));
+                Ok((String::new(), Ty::None))
+            }
+            "页元素属性" => {
+                if args.len() != 2 {
+                    return Err("页元素属性 需要属性名与属性值".into());
+                }
+                let Expr::Str(key) = &args[0] else {
+                    return Err("页元素属性 的第一个参数必须是属性名字符串".into());
+                };
+                let (key_data, key_len) = self.emit_str_const(key);
+                let (value, tag) = self.gen_web_value(&args[1], scopes)?;
+                self.emit(&format!(
+                    "  call void @light_page_element_attr(ptr {}, i64 {}, i64 {}, i32 {})",
+                    key_data, key_len, value, tag
+                ));
+                Ok((String::new(), Ty::None))
+            }
+            "页元素结束" | "页元素闭合" => {
+                if !args.is_empty() {
+                    return Err(format!("{} 不需要参数", name));
+                }
+                let fn_name = if name == "元素结束" {
+                    "light_page_element_end"
+                } else {
+                    "light_page_element_close"
+                };
+                self.emit(&format!("  call void @{}()", fn_name));
+                Ok((String::new(), Ty::None))
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// 追加内容：字符串直传，其余按类型分派
+    fn gen_web_append(&mut self, args: &[Expr], scopes: &mut Vec<Scope>) -> Result<(String, Ty), String> {
+        if args.len() != 1 {
+            return Err("追加内容 需要一个参数".into());
+        }
+        let (reg, ty) = self.gen_expr(&args[0], scopes)?;
+        match ty {
+            Ty::Str => {
+                let p = self.i64_to_ptr(&reg);
+                let d = self.fresh();
+                self.emit(&format!("  {} = call ptr @light_str_ptr(ptr {})", d, p));
+                let len = self.fresh();
+                self.emit(&format!("  {} = call i64 @light_str_len(ptr {})", len, p));
+                self.emit(&format!(
+                    "  call void @light_page_append_str(ptr {}, i64 {})",
+                    d, len
+                ));
+                self.free_value(&reg, &Ty::Str);
+            }
+            Ty::Float => {
+                let d = self.fresh();
+                self.emit(&format!("  {} = bitcast i64 {} to double", d, reg));
+                self.emit(&format!("  call void @light_page_append_float(double {})", d));
+            }
+            Ty::Bool => {
+                self.emit(&format!("  call void @light_page_append_bool(i64 {})", reg));
+            }
+            Ty::Int => {
+                self.emit(&format!("  call void @light_page_append_int(i64 {})", reg));
+            }
+            _ => {
+                // 运行期才知道类型：按标签分派到对应的 append
+                let t = self.fresh();
+                self.emit(&format!("  {} = call i32 @light_tag_of(i64 {})", t, reg));
+                let value = self.untag(&reg);
+                let end_lbl = self.fresh_label("appendend");
+                let float_reg = self.fresh();
+                let arms: Vec<(i32, String)> = vec![
+                    (0, format!("  call void @light_page_append_int(i64 {})", value)),
+                    (
+                        1,
+                        format!(
+                            "  {} = bitcast i64 {} to double\n  call void @light_page_append_float(double {})",
+                            float_reg, value, float_reg
+                        ),
+                    ),
+                    (3, format!("  call void @light_page_append_bool(i64 {})", value)),
+                    (2, String::new()),
+                ];
+                for (tag, _) in &arms {
+                    let cond = self.fresh();
+                    self.emit(&format!("  {} = icmp eq i32 {}, {}", cond, t, tag));
+                    let body = self.fresh_label("appendty");
+                    let next = self.fresh_label("appendnx");
+                    self.emit(&format!(
+                        "  br i1 {}, label %{}, label %{}",
+                        cond, body, next
+                    ));
+                    self.emit(&format!("{}:", body));
+                    if *tag == 2 {
+                        // 字符串要的是裸字节指针与长度，不是 LightStr 结构指针
+                        let p = self.i64_to_ptr(&value);
+                        let d = self.fresh();
+                        self.emit(&format!("  {} = call ptr @light_str_ptr(ptr {})", d, p));
+                        let len = self.fresh();
+                        self.emit(&format!("  {} = call i64 @light_str_len(ptr {})", len, p));
+                        self.emit(&format!(
+                            "  call void @light_page_append_str(ptr {}, i64 {})",
+                            d, len
+                        ));
+                    } else {
+                        let code = &arms.iter().find(|(tg, _)| tg == tag).unwrap().1;
+                        for line in code.lines() {
+                            self.emit(line);
+                        }
+                    }
+                    self.emit(&format!("  br label %{}", end_lbl));
+                    self.emit(&format!("{}:", next));
+                }
+                self.emit(&format!("{}:", end_lbl));
+            }
+        }
+        Ok((String::new(), Ty::None))
+    }
+
+    /// 页面完成：返回完整 HTML 文本
+    fn gen_web_finish(&mut self, args: &[Expr], _scopes: &mut Vec<Scope>) -> Result<(String, Ty), String> {
+        if !args.is_empty() {
+            return Err("页面完成 不需要参数".into());
+        }
+        let p = self.fresh();
+        self.emit(&format!("  {} = call ptr @light_page_finish()", p));
+        let r = self.fresh();
+        self.emit(&format!("  {} = ptrtoint ptr {} to i64", r, p));
+        Ok((r, Ty::Str))
+    }
+
     fn gen_web_request(&mut self, name: &str, args: &[Expr], scopes: &mut Vec<Scope>) -> Result<(String, Ty), String> {
         if args.is_empty() {
             return Err(format!("{} 需要请求参数", name));
         }
         let (request, _) = self.gen_expr(&args[0], scopes)?;
-        if name == "请求头" {
+        if name == "请求头" || name == "请求参数" {
             if args.len() != 2 {
-                return Err("请求头 需要请求和名称".into());
+                return Err(format!("{} 需要请求和名称", name));
             }
             let (name_reg, name_data, name_len) = self.gen_string_parts(&args[1], scopes)?;
+            let function = if name == "请求头" {
+                "light_web_request_header_v1"
+            } else {
+                "light_web_request_param_v1"
+            };
             let result = self.fresh();
             self.emit(&format!(
-                "  {} = call i64 @light_web_request_header_v1(i64 {}, ptr {}, i64 {})",
-                result, request, name_data, name_len
+                "  {} = call i64 @{}(i64 {}, ptr {}, i64 {})",
+                result, function, request, name_data, name_len
             ));
-            if !matches!(args[1], Expr::Ident(_)) {
+            if Self::is_temp(&args[1]) {
                 self.free_value(&name_reg, &Ty::Str);
             }
             Ok((result, Ty::Str))
@@ -1789,10 +2595,25 @@ fn cleanup_scope(&mut self, scope: &Scope) {
     fn gen_call(&mut self, name: &str, args: &[Expr],
                 scopes: &mut Vec<Scope>) -> Result<(String, Ty), String> {
         let name = name.rsplit('.').next().unwrap_or(name);
+        // .llang 别名只在「用户没有自己定义同名函数」时生效，
+        // 否则用户写的 函数 len() 会被别名吞掉
+        let user_defined = self.env.return_types.contains_key(name);
+        let resolved = if user_defined {
+            name.to_string()
+        } else {
+            crate::alias::resolve(name)
+        };
+        let name = resolved.as_str();
         match name {
             "路由" => return self.gen_web_route(args, scopes),
             "启动" => return self.gen_web_run(args, scopes),
-            "请求方法" | "请求路径" | "请求体" | "请求头" => {
+            "页面重置" | "页面语言" | "页面主题" | "追加样式"
+            | "页元素开始" | "页元素文本" | "页元素属性" | "页元素结束" | "页元素闭合" => {
+                return self.gen_web_page(name, args, scopes);
+            }
+            "追加内容" => return self.gen_web_append(args, scopes),
+            "页面完成" => return self.gen_web_finish(args, scopes),
+            "请求方法" | "请求路径" | "请求体" | "请求头" | "请求参数" => {
                 return self.gen_web_request(name, args, scopes);
             }
             "等待全部" => {
@@ -1825,14 +2646,17 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 let r = self.fresh();
                 match ty {
                     Ty::Str => self.emit(&format!("  {} = call i64 @light_str_len(ptr {})", r, p)),
-                    Ty::Array => self.emit(&format!("  {} = call i64 @light_array_len(ptr {})", r, p)),
-                    _ => return Err("长度 只能作用于字符串或数组".into()),
+                    Ty::Array | Ty::List => self.emit(&format!("  {} = call i64 @light_array_len(ptr {})", r, p)),
+                    Ty::Dict => self.emit(&format!("  {} = call i64 @light_dict_len(ptr {})", r, p)),
+                    Ty::Unknown => self.emit(&format!("  {} = call i64 @light_dynamic_len(i64 {})", r, v)),
+                    _ => return Err("长度 只能作用于字符串、数组或字典".into()),
                 }
                 // 临时字符串/数组用完即释放
-                if !matches!(args[0], Expr::Ident(_)) {
+                if Self::is_temp(&args[0]) {
                     match ty {
                         Ty::Str => self.emit(&format!("  call void @light_str_free(ptr {})", p)),
-                        Ty::Array => self.emit(&format!("  call void @light_array_free(ptr {})", p)),
+                        Ty::Array | Ty::List => self.emit(&format!("  call void @light_array_free(ptr {})", p)),
+                        Ty::Dict => self.emit(&format!("  call void @light_dict_free(ptr {})", p)),
                         _ => {}
                     }
                 }
@@ -1890,7 +2714,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             "求和" => {
                 if args.len() != 1 { return Err("求和 需要 1 个数组参数".into()); }
                 let (arr, ty) = self.gen_expr(&args[0], scopes)?;
-                if ty != Ty::Array { return Err("求和 只能作用于数组".into()); }
+                if !matches!(ty, Ty::Array | Ty::List) { return Err("求和 只能作用于数组".into()); }
                 let ap = self.i64_to_ptr(&arr);
                 let len = self.fresh();
                 self.emit(&format!("  {} = call i64 @light_array_len(ptr {})", len, ap));
@@ -1925,7 +2749,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 self.emit(&format!("{}:", end));
                 let r = self.fresh();
                 self.emit(&format!("  {} = load i64, ptr {}", r, sum_reg));
-                if !matches!(args[0], Expr::Ident(_)) {
+                if Self::is_temp(&args[0]) {
                     self.emit(&format!("  call void @light_array_free(ptr {})", ap));
                 }
                 return Ok((r, Ty::Int));
@@ -1942,7 +2766,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                         let p = self.i64_to_ptr(&v);
                         let r = self.fresh();
                         self.emit(&format!("  {} = call i64 @light_str_to_int(ptr {})", r, p));
-                        if !matches!(args[0], Expr::Ident(_)) {
+                        if Self::is_temp(&args[0]) {
                             self.emit(&format!("  call void @light_str_free(ptr {})", p));
                         }
                         Ok((r, Ty::Int))
@@ -1963,7 +2787,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                         let p = self.i64_to_ptr(&v);
                         let r = self.fresh();
                         self.emit(&format!("  {} = call double @light_str_to_float(ptr {})", r, p));
-                        if !matches!(args[0], Expr::Ident(_)) {
+                        if Self::is_temp(&args[0]) {
                             self.emit(&format!("  call void @light_str_free(ptr {})", p));
                         }
                         Ok((r, Ty::Float))
@@ -1982,6 +2806,13 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                     Ty::Str => {
                         return Ok((v, Ty::Str));
                     }
+                    Ty::Unknown => {
+                        // 类型运行期才知道：按标签分派
+                        let val = self.untag(&v);
+                        let t = self.tag_of(&v);
+                        self.emit(&format!("  {} = call ptr @light_dynamic_to_text(i64 {}, i32 {})", sp, val, t));
+                        return Ok((self.ptr_to_i64(&sp), Ty::Str));
+                    }
                     _ => return Err("字符串 无法转换该类型".into()),
                 }
                 let r = self.ptr_to_i64(&sp);
@@ -1997,26 +2828,110 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             "追加" => {
                 if args.len() != 2 { return Err("追加 需要 2 个参数：数组与值".into()); }
                 let (arr, aty) = self.gen_expr(&args[0], scopes)?;
-                if aty != Ty::Array { return Err("追加 第一个参数必须是数组".into()); }
+                if !matches!(aty, Ty::Array | Ty::List | Ty::Unknown) {
+                    return Err("追加 第一个参数必须是数组".into());
+                }
+                // 容器类型运行期才知道：先解标签再当指针用
+                let arr = if aty == Ty::Unknown { self.untag(&arr) } else { arr };
                 let (val, vty) = self.gen_expr(&args[1], scopes)?;
-                let val_i = if vty.is_float() { self.double_to_i64(&val) } else { val };
+                // 把拥有堆资源的变量放进数组：所有权转给数组
+                if let Expr::Ident(n) = &args[1] {
+                    if let Some((_, sty)) = self.lookup(scopes, n) {
+                        if sty.is_owned() {
+                            Self::mark_moved(scopes, n);
+                        }
+                    }
+                }
+                // 追加要保留元素类型，否则字符串/子列表会被当成整数
+                let val_tag = if vty == Ty::Unknown {
+                    self.tag_of(&val)
+                } else {
+                    Self::value_tag(&vty).to_string()
+                };
+                let val_i = self.value_as_i64(&val, &vty);
                 let ap = self.i64_to_ptr(&arr);
-                self.emit(&format!("  call void @light_array_push(ptr {}, i64 {})", ap, val_i));
-                if !matches!(args[0], Expr::Ident(_)) {
+                self.emit(&format!(
+                    "  call void @light_array_push_tag(ptr {}, i32 {}, i64 {})",
+                    ap, val_tag, val_i
+                ));
+                if Self::is_temp(&args[0]) {
                     self.emit(&format!("  call void @light_array_free(ptr {})", ap));
                 }
                 let r = self.fresh();
                 self.emit(&format!("  {} = add i64 0, 0", r));
                 return Ok((r, Ty::None));
             }
+            "读入" => {
+                // 读取标准输入的全部内容（自举编译器用它读源码）
+                if !args.is_empty() {
+                    return Err("读入 不需要参数".into());
+                }
+                let r = self.fresh();
+                self.emit(&format!("  {} = call ptr @light_read_all_stdin()", r));
+                return Ok((self.ptr_to_i64(&r), Ty::Str));
+            }
+            "元素" | "元素文本" | "元素标签" | "键列表" => {
+                // 动态访问容器：编译期类型未知时使用
+                let want = if name == "键列表" { 1 } else { 2 };
+                if args.len() != want {
+                    return Err(format!("{} 需要 {} 个参数", name, want));
+                }
+                let (container, cty) = self.gen_expr(&args[0], scopes)?;
+                let container = if cty == Ty::Unknown { self.untag(&container) } else { container };
+                let cp = self.i64_to_ptr(&container);
+                if want == 1 {
+                    if cty != Ty::Dict && cty != Ty::Unknown {
+                        return Err("键列表 只能作用于字典".into());
+                    }
+                    let r = self.fresh();
+                    self.emit(&format!("  {} = call ptr @light_dict_keys(ptr {})", r, cp));
+                    if Self::is_temp(&args[0]) {
+                        self.free_value(&container, &cty);
+                    }
+                    return Ok((self.ptr_to_i64(&r), Ty::Array));
+                }
+                let (key, kty) = self.gen_expr(&args[1], scopes)?;
+                let key_i = self.value_as_i64(&key, &kty);
+                match (name, cty) {
+                    ("元素", Ty::Array) | ("元素", Ty::List) | ("元素文本", Ty::Array)
+                    | ("元素文本", Ty::List) | ("元素标签", Ty::Array) | ("元素标签", Ty::List)
+                    | ("元素", Ty::Unknown) | ("元素文本", Ty::Unknown)
+                    | ("元素标签", Ty::Unknown) => {
+                        let function = match name {
+                            "元素" => "light_array_get_raw",
+                            "元素文本" => "light_array_get_text",
+                            _ => "light_array_tag_at",
+                        };
+                        let r = self.fresh();
+                        let ty = if name == "元素文本" { "ptr" } else { "i64" };
+                        self.emit(&format!(
+                            "  {} = call {} @{}(ptr {}, i64 {})",
+                            r, ty, function, cp, key_i
+                        ));
+                        if name == "元素文本" {
+                            if Self::is_temp(&args[0]) {
+                                self.free_value(&container, &cty);
+                            }
+                            return Ok((self.ptr_to_i64(&r), Ty::Str));
+                        }
+                        return Ok((r, Ty::Int));
+                    }
+                    _ => {
+                        return Err(format!("{} 只能作用于数组或字典", name));
+                    }
+                }
+            }
             "弹出" => {
                 if args.len() != 1 { return Err("弹出 需要 1 个数组参数".into()); }
                 let (arr, aty) = self.gen_expr(&args[0], scopes)?;
-                if aty != Ty::Array { return Err("弹出 参数必须是数组".into()); }
+                if !matches!(aty, Ty::Array | Ty::List | Ty::Unknown) {
+                    return Err("弹出 参数必须是数组".into());
+                }
+                let arr = if aty == Ty::Unknown { self.untag(&arr) } else { arr };
                 let ap = self.i64_to_ptr(&arr);
                 let r = self.fresh();
                 self.emit(&format!("  {} = call i64 @light_array_pop(ptr {})", r, ap));
-                if !matches!(args[0], Expr::Ident(_)) {
+                if Self::is_temp(&args[0]) {
                     self.emit(&format!("  call void @light_array_free(ptr {})", ap));
                 }
                 return Ok((r, Ty::Int));
@@ -2132,10 +3047,39 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 let subp = self.i64_to_ptr(&sub);
                 let r = self.fresh();
                 self.emit(&format!("  {} = call i64 @light_str_find(ptr {}, ptr {})", r, sp, subp));
-                if !matches!(args[1], Expr::Ident(_)) {
+                if Self::is_temp(&args[1]) {
                     self.emit(&format!("  call void @light_str_free(ptr {})", subp));
                 }
                 return Ok((r, Ty::Int));
+            }
+            "存在" => {
+                if args.len() != 2 {
+                    return Err("存在 需要 2 个参数：字典与键".into());
+                }
+                let (d, dty) = self.gen_expr(&args[0], scopes)?;
+                if dty != Ty::Dict {
+                    return Err("存在 第一个参数必须是字典".into());
+                }
+                let (key, kty) = self.gen_expr(&args[1], scopes)?;
+                let key_i = self.value_as_i64(&key, &kty);
+                let dp = self.i64_to_ptr(&d);
+                let flag = self.fresh();
+                self.emit(&format!(
+                    "  {} = call i1 @light_dict_has(ptr {}, i32 {}, i64 {})",
+                    flag,
+                    dp,
+                    Self::value_tag(&kty),
+                    key_i
+                ));
+                let r = self.fresh();
+                self.emit(&format!("  {} = zext i1 {} to i64", r, flag));
+                if Self::is_temp(&args[1]) {
+                    self.free_value(&key, &kty);
+                }
+                if Self::is_temp(&args[0]) {
+                    self.free_value(&d, &dty);
+                }
+                return Ok((r, Ty::Bool));
             }
             "包含" => {
                 if args.len() != 2 { return Err("包含 需要 2 个参数".into()); }
@@ -2148,11 +3092,48 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                     self.emit(&format!("  {} = call i1 @light_str_contains(ptr {}, ptr {})", r, sp, subp));
                     let r2 = self.fresh();
                     self.emit(&format!("  {} = zext i1 {} to i64", r2, r));
-                    if !matches!(args[1], Expr::Ident(_)) {
+                    if Self::is_temp(&args[1]) {
                         self.emit(&format!("  call void @light_str_free(ptr {})", subp));
                     }
                     return Ok((r2, Ty::Bool));
-                } else if sty == Ty::Array {
+                } else if sty == Ty::Dict {
+                    // 字典：按键判断是否存在
+                    let (key, kty) = self.gen_expr(&args[1], scopes)?;
+                    let key_i = self.value_as_i64(&key, &kty);
+                    let dp = self.i64_to_ptr(&s);
+                    let flag = self.fresh();
+                    self.emit(&format!(
+                        "  {} = call i1 @light_dict_has(ptr {}, i32 {}, i64 {})",
+                        flag,
+                        dp,
+                        Self::value_tag(&kty),
+                        key_i
+                    ));
+                    let r = self.fresh();
+                    self.emit(&format!("  {} = zext i1 {} to i64", r, flag));
+                    if Self::is_temp(&args[1]) {
+                        self.free_value(&key, &kty);
+                    }
+                    if Self::is_temp(&args[0]) {
+                        self.emit(&format!("  call void @light_dict_free(ptr {})", dp));
+                    }
+                    return Ok((r, Ty::Bool));
+                } else if sty == Ty::Unknown {
+                    // 类型运行期才知道：按标签分派（字符串 / 列表 / 字典）
+                    let (val, vty) = self.gen_expr(&args[1], scopes)?;
+                    let val_i = self.value_as_i64(&val, &vty);
+                    let flag = self.fresh();
+                    self.emit(&format!(
+                        "  {} = call i1 @light_dynamic_contains(i64 {}, i64 {}, i32 {})",
+                        flag,
+                        s,
+                        val_i,
+                        Self::value_tag(&vty)
+                    ));
+                    let r = self.fresh();
+                    self.emit(&format!("  {} = zext i1 {} to i64", r, flag));
+                    return Ok((r, Ty::Bool));
+                } else if matches!(sty, Ty::Array | Ty::List) {
                     let (val, vty) = self.gen_expr(&args[1], scopes)?;
                     let val_i = if vty.is_float() { self.double_to_i64(&val) } else { val };
                     let ap = self.i64_to_ptr(&s);
@@ -2176,13 +3157,13 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 let newp = self.i64_to_ptr(&new);
                 let r = self.fresh();
                 self.emit(&format!("  {} = call ptr @light_str_replace(ptr {}, ptr {}, ptr {})", r, sp, oldp, newp));
-                if !matches!(args[0], Expr::Ident(_)) {
+                if Self::is_temp(&args[0]) {
                     self.emit(&format!("  call void @light_str_free(ptr {})", sp));
                 }
-                if !matches!(args[1], Expr::Ident(_)) {
+                if Self::is_temp(&args[1]) {
                     self.emit(&format!("  call void @light_str_free(ptr {})", oldp));
                 }
-                if !matches!(args[2], Expr::Ident(_)) {
+                if Self::is_temp(&args[2]) {
                     self.emit(&format!("  call void @light_str_free(ptr {})", newp));
                 }
                 let rr = self.ptr_to_i64(&r);
@@ -2197,10 +3178,10 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 let sepp = self.i64_to_ptr(&sep);
                 let r = self.fresh();
                 self.emit(&format!("  {} = call ptr @light_str_split(ptr {}, ptr {})", r, sp, sepp));
-                if !matches!(args[0], Expr::Ident(_)) {
+                if Self::is_temp(&args[0]) {
                     self.emit(&format!("  call void @light_str_free(ptr {})", sp));
                 }
-                if !matches!(args[1], Expr::Ident(_)) {
+                if Self::is_temp(&args[1]) {
                     self.emit(&format!("  call void @light_str_free(ptr {})", sepp));
                 }
                 let rr = self.ptr_to_i64(&r);
@@ -2208,17 +3189,19 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             }
             "合并" => {
                 if args.len() != 2 { return Err("合并 需要 2 个参数（数组, 分隔符）".into()); }
-                let (arr, aty) = self.gen_expr(&args[0], scopes)?;
+                let (mut arr, aty) = self.gen_expr(&args[0], scopes)?;
                 let (sep, _) = self.gen_expr(&args[1], scopes)?;
-                if aty != Ty::Array { return Err("合并 第一个参数必须是数组".into()); }
+                // 运行期才知道类型的值可能带标签，先解标签
+                if aty == Ty::Unknown { arr = self.untag(&arr); }
+                if !matches!(aty, Ty::Array | Ty::List | Ty::Unknown) { return Err("合并 第一个参数必须是数组".into()); }
                 let ap = self.i64_to_ptr(&arr);
                 let sepp = self.i64_to_ptr(&sep);
                 let r = self.fresh();
                 self.emit(&format!("  {} = call ptr @light_str_join(ptr {}, ptr {})", r, ap, sepp));
-                if !matches!(args[0], Expr::Ident(_)) {
+                if Self::is_temp(&args[0]) {
                     self.emit(&format!("  call void @light_array_free(ptr {})", ap));
                 }
-                if !matches!(args[1], Expr::Ident(_)) {
+                if Self::is_temp(&args[1]) {
                     self.emit(&format!("  call void @light_str_free(ptr {})", sepp));
                 }
                 let rr = self.ptr_to_i64(&r);
@@ -2231,7 +3214,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 let sp = self.i64_to_ptr(&v);
                 let r = self.fresh();
                 self.emit(&format!("  {} = call ptr @light_str_upper(ptr {})", r, sp));
-                if !matches!(args[0], Expr::Ident(_)) {
+                if Self::is_temp(&args[0]) {
                     self.emit(&format!("  call void @light_str_free(ptr {})", sp));
                 }
                 let rr = self.ptr_to_i64(&r);
@@ -2244,7 +3227,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 let sp = self.i64_to_ptr(&v);
                 let r = self.fresh();
                 self.emit(&format!("  {} = call ptr @light_str_lower(ptr {})", r, sp));
-                if !matches!(args[0], Expr::Ident(_)) {
+                if Self::is_temp(&args[0]) {
                     self.emit(&format!("  call void @light_str_free(ptr {})", sp));
                 }
                 let rr = self.ptr_to_i64(&r);
@@ -2257,7 +3240,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 let sp = self.i64_to_ptr(&v);
                 let r = self.fresh();
                 self.emit(&format!("  {} = call ptr @light_str_trim(ptr {})", r, sp));
-                if !matches!(args[0], Expr::Ident(_)) {
+                if Self::is_temp(&args[0]) {
                     self.emit(&format!("  call void @light_str_free(ptr {})", sp));
                 }
                 let rr = self.ptr_to_i64(&r);
@@ -2273,17 +3256,17 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                         let sp = self.i64_to_ptr(&s);
                         let r = self.fresh();
                         self.emit(&format!("  {} = call ptr @light_str_substr(ptr {}, i64 {}, i64 {})", r, sp, start, end));
-                        if !matches!(args[0], Expr::Ident(_)) {
+                        if Self::is_temp(&args[0]) {
                             self.emit(&format!("  call void @light_str_free(ptr {})", sp));
                         }
                         let rr = self.ptr_to_i64(&r);
                         return Ok((rr, Ty::Str));
                     }
-                    Ty::Array => {
+                    Ty::Array | Ty::List => {
                         let ap = self.i64_to_ptr(&s);
                         let r = self.fresh();
                         self.emit(&format!("  {} = call ptr @light_array_slice(ptr {}, i64 {}, i64 {})", r, ap, start, end));
-                        if !matches!(args[0], Expr::Ident(_)) {
+                        if Self::is_temp(&args[0]) {
                             self.emit(&format!("  call void @light_array_free(ptr {})", ap));
                         }
                         let rr = self.ptr_to_i64(&r);
@@ -2297,12 +3280,12 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 if args.len() != 2 { return Err("索引 需要 2 个参数（数组, 值）".into()); }
                 let (arr, aty) = self.gen_expr(&args[0], scopes)?;
                 let (val, vty) = self.gen_expr(&args[1], scopes)?;
-                if aty != Ty::Array { return Err("索引 第一个参数必须是数组".into()); }
-                let val_i = if vty.is_float() { self.double_to_i64(&val) } else { val };
+                if !matches!(aty, Ty::Array | Ty::List) { return Err("索引 第一个参数必须是数组".into()); }
+                let val_i = self.value_as_i64(&val, &vty);
                 let ap = self.i64_to_ptr(&arr);
                 let r = self.fresh();
                 self.emit(&format!("  {} = call i64 @light_array_index(ptr {}, i64 {})", r, ap, val_i));
-                if !matches!(args[0], Expr::Ident(_)) {
+                if Self::is_temp(&args[0]) {
                     self.emit(&format!("  call void @light_array_free(ptr {})", ap));
                 }
                 return Ok((r, Ty::Int));
@@ -2310,11 +3293,11 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             "反转" => {
                 if args.len() != 1 { return Err("反转 需要 1 个数组参数".into()); }
                 let (arr, aty) = self.gen_expr(&args[0], scopes)?;
-                if aty != Ty::Array { return Err("反转 参数必须是数组".into()); }
+                if !matches!(aty, Ty::Array | Ty::List) { return Err("反转 参数必须是数组".into()); }
                 let ap = self.i64_to_ptr(&arr);
                 let r = self.fresh();
                 self.emit(&format!("  {} = call ptr @light_array_reverse(ptr {})", r, ap));
-                if !matches!(args[0], Expr::Ident(_)) {
+                if Self::is_temp(&args[0]) {
                     self.emit(&format!("  call void @light_array_free(ptr {})", ap));
                 }
                 let rr = self.ptr_to_i64(&r);
@@ -2323,7 +3306,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             "排序" => {
                 if args.len() != 1 { return Err("排序 需要 1 个数组参数".into()); }
                 let (arr, aty) = self.gen_expr(&args[0], scopes)?;
-                if aty != Ty::Array { return Err("排序 参数必须是数组".into()); }
+                if !matches!(aty, Ty::Array | Ty::List) { return Err("排序 参数必须是数组".into()); }
                 let ap = self.i64_to_ptr(&arr);
                 self.emit(&format!("  call void @light_array_sort(ptr {})", ap));
                 return Ok((arr, Ty::Array));
@@ -2332,15 +3315,15 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 if args.len() != 2 { return Err("连接 需要 2 个数组参数".into()); }
                 let (a, aty) = self.gen_expr(&args[0], scopes)?;
                 let (b, bty) = self.gen_expr(&args[1], scopes)?;
-                if aty != Ty::Array || bty != Ty::Array { return Err("连接 参数必须是数组".into()); }
+                if !matches!(aty, Ty::Array | Ty::List) || !matches!(bty, Ty::Array | Ty::List) { return Err("连接 参数必须是数组".into()); }
                 let ap = self.i64_to_ptr(&a);
                 let bp = self.i64_to_ptr(&b);
                 let r = self.fresh();
                 self.emit(&format!("  {} = call ptr @light_array_concat(ptr {}, ptr {})", r, ap, bp));
-                if !matches!(args[0], Expr::Ident(_)) {
+                if Self::is_temp(&args[0]) {
                     self.emit(&format!("  call void @light_array_free(ptr {})", ap));
                 }
-                if !matches!(args[1], Expr::Ident(_)) {
+                if Self::is_temp(&args[1]) {
                     self.emit(&format!("  call void @light_array_free(ptr {})", bp));
                 }
                 let rr = self.ptr_to_i64(&r);
@@ -2354,7 +3337,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 let pp = self.i64_to_ptr(&path);
                 let r = self.fresh();
                 self.emit(&format!("  {} = call ptr @light_file_read(ptr {})", r, pp));
-                if !matches!(args[0], Expr::Ident(_)) {
+                if Self::is_temp(&args[0]) {
                     self.emit(&format!("  call void @light_str_free(ptr {})", pp));
                 }
                 let rr = self.ptr_to_i64(&r);
@@ -2369,10 +3352,10 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 let cp = self.i64_to_ptr(&content);
                 let r = self.fresh();
                 self.emit(&format!("  {} = call i1 @light_file_write(ptr {}, ptr {})", r, pp, cp));
-                if !matches!(args[0], Expr::Ident(_)) {
+                if Self::is_temp(&args[0]) {
                     self.emit(&format!("  call void @light_str_free(ptr {})", pp));
                 }
-                if !matches!(args[1], Expr::Ident(_)) {
+                if Self::is_temp(&args[1]) {
                     self.emit(&format!("  call void @light_str_free(ptr {})", cp));
                 }
                 let r2 = self.fresh();
@@ -2388,10 +3371,10 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 let cp = self.i64_to_ptr(&content);
                 let r = self.fresh();
                 self.emit(&format!("  {} = call i1 @light_file_append(ptr {}, ptr {})", r, pp, cp));
-                if !matches!(args[0], Expr::Ident(_)) {
+                if Self::is_temp(&args[0]) {
                     self.emit(&format!("  call void @light_str_free(ptr {})", pp));
                 }
-                if !matches!(args[1], Expr::Ident(_)) {
+                if Self::is_temp(&args[1]) {
                     self.emit(&format!("  call void @light_str_free(ptr {})", cp));
                 }
                 let r2 = self.fresh();
@@ -2405,7 +3388,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 let pp = self.i64_to_ptr(&path);
                 let r = self.fresh();
                 self.emit(&format!("  {} = call i1 @light_file_exists(ptr {})", r, pp));
-                if !matches!(args[0], Expr::Ident(_)) {
+                if Self::is_temp(&args[0]) {
                     self.emit(&format!("  call void @light_str_free(ptr {})", pp));
                 }
                 let r2 = self.fresh();
@@ -2420,7 +3403,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 let cp = self.i64_to_ptr(&cmd);
                 let r = self.fresh();
                 self.emit(&format!("  {} = call ptr @light_sys_exec(ptr {})", r, cp));
-                if !matches!(args[0], Expr::Ident(_)) {
+                if Self::is_temp(&args[0]) {
                     self.emit(&format!("  call void @light_str_free(ptr {})", cp));
                 }
                 let rr = self.ptr_to_i64(&r);
@@ -2433,11 +3416,99 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 let np = self.i64_to_ptr(&name);
                 let r = self.fresh();
                 self.emit(&format!("  {} = call ptr @light_sys_getenv(ptr {})", r, np));
-                if !matches!(args[0], Expr::Ident(_)) {
+                if Self::is_temp(&args[0]) {
                     self.emit(&format!("  call void @light_str_free(ptr {})", np));
                 }
                 let rr = self.ptr_to_i64(&r);
                 return Ok((rr, Ty::Str));
+            }
+            // ---- 机器层：裸内存原语（用 Light 写运行时的地基）----
+            "内存分配" => {
+                if args.len() != 1 { return Err("内存分配 需要 1 个参数（字节数）".into()); }
+                let (n, _) = self.gen_expr(&args[0], scopes)?;
+                let r = self.fresh();
+                self.emit(&format!("  {} = call i64 @light_mem_alloc(i64 {})", r, n));
+                return Ok((r, Ty::Int));
+            }
+            "内存释放" => {
+                if args.len() != 1 { return Err("内存释放 需要 1 个地址".into()); }
+                let (p, _) = self.gen_expr(&args[0], scopes)?;
+                self.emit(&format!("  call void @light_mem_free(i64 {})", p));
+                let r = self.fresh();
+                self.emit(&format!("  {} = add i64 0, 0", r));
+                return Ok((r, Ty::Int));
+            }
+            "内存复制" => {
+                if args.len() != 3 { return Err("内存复制 需要 3 个参数（目标, 源, 字节数）".into()); }
+                let (d, _) = self.gen_expr(&args[0], scopes)?;
+                let (s2, _) = self.gen_expr(&args[1], scopes)?;
+                let (n, _) = self.gen_expr(&args[2], scopes)?;
+                let r = self.fresh();
+                self.emit(&format!("  {} = call i64 @light_mem_copy(i64 {}, i64 {}, i64 {})", r, d, s2, n));
+                return Ok((r, Ty::Int));
+            }
+            "内存置零" => {
+                if args.len() != 2 { return Err("内存置零 需要 2 个参数（地址, 字节数）".into()); }
+                let (p, _) = self.gen_expr(&args[0], scopes)?;
+                let (n, _) = self.gen_expr(&args[1], scopes)?;
+                self.emit(&format!("  call void @light_mem_zero(i64 {}, i64 {})", p, n));
+                let r = self.fresh();
+                self.emit(&format!("  {} = add i64 0, 0", r));
+                return Ok((r, Ty::Int));
+            }
+            "内存整数" => {
+                if args.len() != 1 { return Err("内存整数 需要 1 个地址".into()); }
+                let (p, _) = self.gen_expr(&args[0], scopes)?;
+                let r = self.fresh();
+                self.emit(&format!("  {} = call i64 @light_mem_load(i64 {})", r, p));
+                return Ok((r, Ty::Int));
+            }
+            "存内存整数" => {
+                if args.len() != 2 { return Err("存内存整数 需要 2 个参数（地址, 值）".into()); }
+                let (p, _) = self.gen_expr(&args[0], scopes)?;
+                let (v, _) = self.gen_expr(&args[1], scopes)?;
+                self.emit(&format!("  call void @light_mem_store(i64 {}, i64 {})", p, v));
+                let r = self.fresh();
+                self.emit(&format!("  {} = add i64 0, 0", r));
+                return Ok((r, Ty::Int));
+            }
+            "内存字节" => {
+                if args.len() != 1 { return Err("内存字节 需要 1 个地址".into()); }
+                let (p, _) = self.gen_expr(&args[0], scopes)?;
+                let r = self.fresh();
+                self.emit(&format!("  {} = call i64 @light_mem_load8(i64 {})", r, p));
+                return Ok((r, Ty::Int));
+            }
+            "存内存字节" => {
+                if args.len() != 2 { return Err("存内存字节 需要 2 个参数（地址, 值）".into()); }
+                let (p, _) = self.gen_expr(&args[0], scopes)?;
+                let (v, _) = self.gen_expr(&args[1], scopes)?;
+                self.emit(&format!("  call void @light_mem_store8(i64 {}, i64 {})", p, v));
+                let r = self.fresh();
+                self.emit(&format!("  {} = add i64 0, 0", r));
+                return Ok((r, Ty::Int));
+            }
+            "命令行参数" => {
+                if !args.is_empty() { return Err("命令行参数 不需要参数".into()); }
+                let p = self.fresh();
+                self.emit(&format!("  {} = call ptr @light_argv()", p));
+                let r = self.ptr_to_i64(&p);
+                return Ok((r, Ty::Array));
+            }
+            // 诊断输出：写标准错误，不污染 stdout 上的编译产物
+            "错误输出" => {
+                if args.len() != 1 { return Err("错误输出 需要 1 个字符串参数".into()); }
+                let (v, ty) = self.gen_expr(&args[0], scopes)?;
+                if ty != Ty::Str { return Err("错误输出 参数必须是字符串".into()); }
+                let sp = self.i64_to_ptr(&v);
+                let data = self.fresh();
+                self.emit(&format!("  {} = call ptr @light_str_ptr(ptr {})", data, sp));
+                let len = self.fresh();
+                self.emit(&format!("  {} = call i64 @light_str_len(ptr {})", len, sp));
+                self.emit(&format!("  call void @light_eprint_str(ptr {}, i64 {})", data, len));
+                let r = self.fresh();
+                self.emit(&format!("  {} = add i64 0, 0", r));
+                return Ok((r, Ty::Int));
             }
             "退出" => {
                 if args.len() != 1 { return Err("退出 需要 1 个退出码参数".into()); }
@@ -2458,12 +3529,50 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         }
 
         // 普通函数调用
+        // 实参与形参个数必须一致：少传会让被调函数读到未初始化的参数槽
+        if let Some(params) = self.env.param_names.get(name) {
+            if params.len() != args.len() {
+                return Err(format!(
+                    "函数 {} 需要 {} 个参数，调用处给了 {} 个",
+                    name,
+                    params.len(),
+                    args.len()
+                ).into());
+            }
+        }
+        let extern_param_tys = self.extern_param_types.get(name).cloned();
+        let is_extern = self.externs.contains(name);
         let mut arg_vals = Vec::new();
         let mut arg_tys = Vec::new();
-        for a in args {
+        for (idx, a) in args.iter().enumerate() {
             let (r, t) = self.gen_expr(a, scopes)?;
-            // 浮点参数 bitcast 为 i64
-            let v = if t.is_float() {
+            // 外部函数的形参没写标注时是动态的：实参要带运行期标签，
+            // 原生侧才能按标签分派；写了标注就按标注直传。
+            // 没标注、或标成「任意」，都算动态形参：实参要带运行期标签
+            let pty = extern_param_tys
+                .as_ref()
+                .and_then(|v| v.get(idx))
+                .cloned();
+            let wants_tag = is_extern
+                && matches!(pty, None | Some(None) | Some(Some(ITy::Unknown)));
+            let r = if wants_tag {
+                self.tag_value(&r, &t)
+            } else if t == Ty::Unknown {
+                self.untag(&r)
+            } else {
+                r
+            };
+            // 字符串变量按值传入：复制一份，被调函数负责释放
+            let r = if t == Ty::Str && matches!(a, Expr::Ident(_)) {
+                let p = self.i64_to_ptr(&r);
+                let d = self.fresh();
+                self.emit(&format!("  {} = call ptr @light_str_dup(ptr {})", d, p));
+                self.ptr_to_i64(&d)
+            } else {
+                r
+            };
+            // 浮点参数 bitcast 为 i64；打标签时 tag_value 已经转过一次，别再来一遍
+            let v = if t.is_float() && !wants_tag {
                 let bc = self.fresh();
                 self.emit(&format!("  {} = bitcast double {} to i64", bc, r));
                 bc
@@ -2473,15 +3582,6 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             arg_vals.push(v);
             arg_tys.push(t);
         }
-        // move 语义：把拥有堆资源的实参所有权转移给被调函数
-        let is_user_fn = self.env.return_types.contains_key(name);
-        if is_user_fn {
-            for a in args {
-                if let Expr::Ident(n) = a {
-                    Self::mark_moved(scopes, n);
-                }
-            }
-        }
         let arg_list = arg_vals.iter().map(|r| format!("i64 {}", r)).collect::<Vec<_>>().join(", ");
         let r = self.fresh();
         let callee = if self.externs.contains(name) {
@@ -2490,9 +3590,16 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             Self::mangle(name)
         };
         self.emit(&format!("  {} = call i64 @{}({})", r, callee, arg_list));
-        let ret_ty: Ty = self.env.return_types.get(name).cloned()
-            .map(|t| t.into())
-            .unwrap_or(Ty::Int);
+        // 外部函数优先用声明里的返回标注，其次才看推断结果
+        let ret_ty: Ty = if let Some(rt) = self.extern_return_types.get(name) {
+            Ty::from(rt.clone())
+        } else {
+            self.env.return_types
+                .get(name)
+                .cloned()
+                .map(|t| t.into())
+                .unwrap_or(Ty::Int)
+        };
         // 浮点返回：bitcast 回 double
         if ret_ty.is_float() {
             let f = self.fresh();
@@ -2506,5 +3613,45 @@ fn cleanup_scope(&mut self, scope: &Scope) {
 
 /// 把 f64 格式化为 LLVM 浮点常量（使用 IEEE-754 十六进制表示，精确且通用）
 fn format_float_const(n: f64) -> String {
-    format!("0x{:016x}", n.to_bits())
+    // LLVM 的十六进制字面量是整数，浮点必须给十进制（带小数点）形式，
+    // 否则 fadd double 0.0, 0x3ff0... 会被当成整数转换，数值全错。
+    if n.is_nan() {
+        return "0x7FF8000000000000".to_string(); // 仍是整数形式，仅占位
+    }
+    if n.is_infinite() {
+        return if n > 0.0 { "0x7FF0000000000000".to_string() } else { "0xFFF0000000000000".to_string() };
+    }
+    let s = format!("{:?}", n); // Rust 的 Debug 格式对 f64 可往返
+    if s.contains('.') || s.contains('e') || s.contains('E') {
+        s
+    } else {
+        format!("{}.0", s)
+    }
+}
+
+/// 页面元素编号：必须与 lightweb::elements 中的常量一致
+fn element_kind_id(name: &str) -> Result<i32, String> {
+    let id = match name {
+        "标题" => 0,
+        "段落" => 1,
+        "按钮" => 2,
+        "链接" => 3,
+        "图片" => 4,
+        "输入框" => 5,
+        "文本域" => 6,
+        "复选框" => 7,
+        "单选框" => 8,
+        "下拉框" => 9,
+        "列表" => 10,
+        "表格" => 11,
+        "分隔线" => 12,
+        "卡片" => 13,
+        "标签" => 14,
+        "进度条" => 15,
+        "代码块" => 16,
+        "提示" => 17,
+        "容器" => 18,
+        other => return Err(format!("未知的页面元素：{}", other)),
+    };
+    Ok(id)
 }

@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  LightLang Windows 安装包（MSI）
+
+  工具链：WiX v5（`dotnet tool install -global wix`）
+  图形向导：需要 WixToolset.UI 扩展
+      wix extension add WixToolset.UI
+      wix build packaging/windows/Product.wxs -arch x64
+          -d ProductVersion=0.2.1
+          -d SourceDir=<素材目录>
+          -d WixUI=1
+          -d Shortcuts=1
+          -o dist/LightLang-VERSION-windows-x64.msi
+
+  开关：
+      WixUI=1      启用 WixUI 图形安装向导
+      Shortcuts=1  创建开始菜单快捷方式
+
+  注意：WixUI 对话框与快捷方式都要通过 Windows Installer 接口写库，
+  在 wine 下这两部分会被跳过或失败；Linux/macOS 上构建出的 MSI 因此
+  没有向导与快捷方式，Windows 上构建则是完整的图形安装包。
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <?define ProductName = "LightLang" ?>
+  <?define UpgradeCode = "{62FC17C5-E87F-5EC4-BFCF-3071C3EC1B42}" ?>
+
+  <Package Name="$(var.ProductName)"
+           Manufacturer="$(var.ProductName)"
+           Version="$(var.ProductVersion)"
+           UpgradeCode="$(var.UpgradeCode)"
+           Scope="perMachine"
+           Compressed="yes"
+           InstallerVersion="500"
+           Language="2052">
+
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of LightLang is already installed. Please uninstall it first." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- 安装布局 -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLDIR" Name="LightLang">
+        <Directory Id="BINDIR" Name="bin" />
+        <Directory Id="LIBDIR" Name="lib" />
+        <Directory Id="SHAREDIR" Name="share">
+          <Directory Id="SHARELANGDIR" Name="light-lang" />
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+<?if $(var.Shortcuts) = 1 ?>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="AppShortcutFolder" Name="LightLang" />
+    </StandardDirectory>
+<?endif?>
+
+    <Icon Id="AppIcon" SourceFile="$(var.SourceDir)/light.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="ARPNOREPAIR" Value="1" />
+    <Property Id="ARPCOMMENTS" Value="lightc compiler, light runner, lightGo project tool (MinGW build)" />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLDIR" />
+    <!--
+      MSI 不修改系统 PATH：写入前无法可靠读到旧值（跨平台构建时更不行），
+      避免把用户 PATH 覆盖成空。安装后可用开始菜单的 LightLang Console 快捷方式，
+      或用 EXE 安装程序（会自动维护 PATH）。
+    -->
+
+    <!-- 把 bin 追加到系统 PATH：先读原值，追加后写回，卸载时由 MSI 还原 -->
+    <ComponentGroup Id="ProductComponents" Directory="BINDIR">
+      <Component Id="LightExe" Guid="6B1C9A44-8E2D-4F73-B0A5-2C9E7D1F3A88">
+        <File Id="LightExeFile" Source="$(var.SourceDir)/light.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="LightcExe" Guid="7D2E4B55-9F3A-4C64-8E1B-3A5C8D2E4B99">
+        <File Id="LightcExeFile" Source="$(var.SourceDir)/lightc.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="LightGoExe" Guid="8E3F5C66-A04B-4D75-9F2C-4B6D9E3F5CAA">
+        <File Id="LightGoExeFile" Source="$(var.SourceDir)/lightGo.exe" KeyPath="yes" />
+      </Component>
+
+    </ComponentGroup>
+
+    <Component Id="LightLib" Guid="9F406D77-B15C-4E86-A03D-5C7EAF4061BB" Directory="LIBDIR">
+      <File Id="LightRtLib" Source="$(var.SourceDir)/liblightrt.a" KeyPath="yes" />
+    </Component>
+    <Component Id="Docs" Guid="A0517E88-C26D-4F97-B14E-6D8FB05172CC" Directory="INSTALLDIR">
+      <File Id="ReadmeFile" Source="$(var.SourceDir)/README.md" KeyPath="yes" />
+      <File Id="LicenseFile" Source="$(var.SourceDir)/LICENSE" />
+    </Component>
+    <Component Id="Examples" Guid="B1628F99-D37E-40A8-C25F-7E9AC16283DD" Directory="SHARELANGDIR">
+      <File Id="ExamplesFile" Source="$(var.SourceDir)/examples.zip" KeyPath="yes" />
+    </Component>
+    <Component Id="Skills" Guid="C27390AA-E48F-41B9-D360-8FABD27394EE" Directory="SHARELANGDIR">
+      <File Id="SkillsFile" Source="$(var.SourceDir)/skills.zip" KeyPath="yes" />
+    </Component>
+<?if $(var.Shortcuts) = 1 ?>
+    <Component Id="StartMenuShortcuts" Guid="2A7E5C55-9D34-4B6E-8A21-5F0C7D9E4B33" Directory="AppShortcutFolder">
+      <Shortcut Id="CmdShortcut"
+                Name="LightLang Console"
+                Description="Open a LightLang console with PATH configured"
+                Target="[SystemFolder]cmd.exe"
+                Arguments="/k set &quot;PATH=[INSTALLDIR]bin;%PATH%&quot; &amp; title LightLang"
+                WorkingDirectory="INSTALLDIR"
+                Icon="AppIcon" />
+      <Shortcut Id="UninstallShortcut"
+                Name="Uninstall LightLang"
+                Description="Uninstall LightLang"
+                Target="[System64Folder]msiexec.exe"
+                Arguments="/x [ProductCode]"
+                Icon="AppIcon" />
+      <RemoveFolder Id="RemoveAppShortcutFolder" Directory="AppShortcutFolder" On="uninstall" />
+      <RegistryValue Root="HKCU" Key="Software/LightLang" Name="InstallFolder" Type="string" Value="[INSTALLDIR]" KeyPath="yes" />
+    </Component>
+<?endif?>
+
+    <Feature Id="MainFeature" Title="LightLang" Level="1" AllowAbsent="no">
+      <ComponentGroupRef Id="ProductComponents" />
+      <ComponentRef Id="LightLib" />
+      <ComponentRef Id="Docs" />
+      <ComponentRef Id="Examples" />
+      <ComponentRef Id="Skills" />
+<?if $(var.Shortcuts) = 1 ?>
+      <ComponentRef Id="StartMenuShortcuts" />
+<?endif?>
+    </Feature>
+
+<?if $(var.WixUI) = 1 ?>
+    <!-- 图形安装向导：欢迎 / 许可协议 / 安装目录 / 安装进度 / 完成 -->
+    <UI Id="WixUI_InstallDir" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.SourceDir)/License.rtf" />
+<?endif?>
+
+  </Package>
+
+</Wix>

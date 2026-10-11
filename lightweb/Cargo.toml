@@ -9,4 +9,7 @@ crate-type = ["staticlib"]
 
 [dependencies]
 tiny_http = "0.12.0"
-lightrt = { path = "../lightrt" }
+# 依赖 lightrt 是为了复用它的 std。两个 Rust staticlib 直接相加会因
+# 重复的 std 符号链接失败，所以 lightc 链接时用 --allow-multiple-definition，
+# 让先出现的 lightrt 定义生效（见 lightc/src/main.rs 的 link 函数）
+lightrt = { path = "../lightrt", package = "lightrt" }

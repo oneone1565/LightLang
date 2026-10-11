@@ -6,11 +6,13 @@ use crate::lexer::{Token, TokenKind};
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// 是否已导入 lightWeb；网页语法必须先导入才可用
+    lightweb: bool,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Parser { tokens, pos: 0 }
+        Parser { tokens, pos: 0, lightweb: false }
     }
 
     fn peek(&self) -> &Token {
@@ -65,7 +67,13 @@ impl Parser {
             TokenKind::Fn => Ok(Item::Fn(self.parse_fn()?)),
             TokenKind::Extern => Ok(Item::Extern(self.parse_extern()?)),
             TokenKind::Ident(name) if name == "从" => Ok(Item::Import(self.parse_from_import()?)),
-            TokenKind::Import => Ok(Item::Import(self.parse_import()?)),
+            TokenKind::Import => {
+                let path = self.parse_import()?;
+                if path == "lightWeb" {
+                    self.lightweb = true;
+                }
+                Ok(Item::Import(path))
+            }
             _ => Ok(Item::Stmt(self.parse_stmt()?)),
         }
     }
@@ -78,11 +86,28 @@ impl Parser {
         };
         self.expect(TokenKind::LParen)?;
         let mut params = Vec::new();
+        let mut param_types: Vec<Option<String>> = Vec::new();
         if !matches!(self.peek_kind(), TokenKind::RParen) {
             loop {
                 match self.bump().kind {
                     TokenKind::Ident(s) => params.push(s),
                     other => return Err(format!("参数名必须是标识符，得到 {}", other)),
+                }
+                // 可选的类型标注：函数 f(列表: 列表, 数量: 整数):
+                if matches!(self.peek_kind(), TokenKind::Colon) {
+                    self.bump();
+                    let type_name = match self.bump().kind {
+                        TokenKind::Ident(t) => t,
+                        other => {
+                            return Err(format!("参数类型必须是类型名，得到 {}", other))
+                        }
+                    };
+                    if !is_type_name(&type_name) {
+                        return Err(format!("未知的参数类型：{}", type_name));
+                    }
+                    param_types.push(Some(type_name));
+                } else {
+                    param_types.push(None);
                 }
                 if matches!(self.peek_kind(), TokenKind::Comma) {
                     self.bump();
@@ -92,10 +117,24 @@ impl Parser {
             }
         }
         self.expect(TokenKind::RParen)?;
+        // 可选的返回类型标注：函数 f() -> 字符串:
+        let mut return_type: Option<String> = None;
+        if matches!(self.peek_kind(), TokenKind::Minus) && matches!(self.peek_kind_at(1), TokenKind::Gt) {
+            self.bump();
+            self.bump();
+            let type_name = match self.bump().kind {
+                TokenKind::Ident(t) => t,
+                other => return Err(format!("返回类型必须是类型名，得到 {}", other)),
+            };
+            if !is_type_name(&type_name) {
+                return Err(format!("未知的返回类型：{}", type_name));
+            }
+            return_type = Some(type_name);
+        }
         self.expect(TokenKind::Colon)?;
         self.expect(TokenKind::Newline)?;
         let body = self.parse_block()?;
-        Ok(FnDef { name, params, body })
+        Ok(FnDef { name, params, param_types, return_type, body })
     }
 
     fn parse_extern(&mut self) -> Result<ExternDecl, String> {
@@ -106,12 +145,23 @@ impl Parser {
         };
         self.expect(TokenKind::LParen)?;
         let mut params = Vec::new();
+        let mut param_types = Vec::new();
         if !matches!(self.peek_kind(), TokenKind::RParen) {
             loop {
                 match self.bump().kind {
                     TokenKind::Ident(s) => params.push(s),
                     other => return Err(format!("参数名必须是标识符，得到 {}", other)),
                 }
+                // 可选的 `: 类型` 标注；没写就是动态值
+                let mut annotated = None;
+                if matches!(self.peek_kind(), TokenKind::Colon) {
+                    self.bump();
+                    match self.bump().kind {
+                        TokenKind::Ident(t) if is_type_name(&t) => annotated = Some(t),
+                        other => return Err(format!("未知的参数类型：{}", other)),
+                    }
+                }
+                param_types.push(annotated);
                 if matches!(self.peek_kind(), TokenKind::Comma) {
                     self.bump();
                 } else {
@@ -120,8 +170,18 @@ impl Parser {
             }
         }
         self.expect(TokenKind::RParen)?;
+        // 可选的 `-> 类型` 返回标注
+        let mut return_type = None;
+        if matches!(self.peek_kind(), TokenKind::Minus) && matches!(self.peek_kind_at(1), TokenKind::Gt) {
+            self.bump();
+            self.bump();
+            match self.bump().kind {
+                TokenKind::Ident(t) if is_type_name(&t) => return_type = Some(t),
+                other => return Err(format!("未知的返回类型：{}", other)),
+            }
+        }
         self.expect(TokenKind::Newline)?;
-        Ok(ExternDecl { name, params })
+        Ok(ExternDecl { name, params, param_types, return_type })
     }
 
     fn parse_import(&mut self) -> Result<String, String> {
@@ -265,7 +325,10 @@ impl Parser {
                 Ok(Stmt::Throw(value))
             }
             TokenKind::Thread => self.parse_thread(),
-            TokenKind::Page => self.parse_page(),
+            TokenKind::Page => {
+                self.require_lightweb("页面")?;
+                self.parse_page()
+            }
             TokenKind::Try => self.parse_try(),
             TokenKind::If => self.parse_if(),
             TokenKind::While => {
@@ -309,6 +372,14 @@ impl Parser {
                 self.consume_line_end()?;
                 Ok(Stmt::Return(value))
             }
+            // 元素名后不能紧跟 =，否则是普通赋值（列表 = [1, 2]）
+            TokenKind::Ident(name)
+                if is_page_element(&name)
+                    && !matches!(self.peek_kind_at(1), TokenKind::Assign) =>
+            {
+                self.require_lightweb(&name)?;
+                self.parse_element(&name)
+            }
             TokenKind::Asm => {
                 self.bump();
                 let raw = match self.bump().kind {
@@ -320,6 +391,19 @@ impl Parser {
             }
             _ => {
                 let expr = self.parse_expr()?;
+                // 未知元素给出可用元素提示
+                if let Expr::Ident(name) = &expr {
+                    if matches!(
+                        self.peek_kind(),
+                        TokenKind::Str(_) | TokenKind::Int(_) | TokenKind::Float(_)
+                    ) {
+                        return Err(format!(
+                            "未知语句：{}；页面可用的元素有 {}",
+                            name,
+                            page_element_names().join("、")
+                        ));
+                    }
+                }
                 if matches!(self.peek_kind(), TokenKind::Assign) {
                     self.bump();
                     let value = self.parse_expr()?;
@@ -330,6 +414,62 @@ impl Parser {
                     Ok(Stmt::Expr(expr))
                 }
             }
+        }
+    }
+
+    /// 页面元素：`元素名 ["文本"] [键=表达式]*`
+    fn parse_element(&mut self, kind: &str) -> Result<Stmt, String> {
+        self.bump();
+        if kind == "结束" {
+            self.consume_line_end()?;
+            return Ok(Stmt::ElementEnd);
+        }
+        let mut text = None;
+        // 文本是可选的第一个字面量；`键=值` 形式则是属性
+        if matches!(
+            self.peek_kind(),
+            TokenKind::Str(_) | TokenKind::Int(_) | TokenKind::Float(_) | TokenKind::True
+                | TokenKind::False | TokenKind::None
+        ) {
+            text = Some(self.parse_expr()?);
+        }
+        let mut attrs: Vec<(String, Expr)> = Vec::new();
+        while matches!(self.peek_kind(), TokenKind::Ident(_)) {
+            let key = match self.bump().kind {
+                TokenKind::Ident(key) => key,
+                other => return Err(format!("元素属性名必须是标识符，得到 {}", other)),
+            };
+            if !matches!(self.peek_kind(), TokenKind::Assign) {
+                return Err(format!("元素属性 {} 后面需要 =", key));
+            }
+            self.bump();
+            let value = self.parse_expr()?;
+            if key == "文本" && text.is_none() {
+                text = Some(value);
+            } else {
+                attrs.push((key, value));
+            }
+        }
+        // 以冒号结尾表示带子块（容器等）
+        let body = if matches!(self.peek_kind(), TokenKind::Colon) {
+            self.bump();
+            self.expect(TokenKind::Newline)?;
+            Some(self.parse_block()?)
+        } else {
+            self.consume_line_end()?;
+            None
+        };
+        Ok(Stmt::Element { kind: kind.to_string(), text, attrs, body })
+    }
+
+    fn require_lightweb(&self, what: &str) -> Result<(), String> {
+        if self.lightweb {
+            Ok(())
+        } else {
+            Err(format!(
+                "使用了网页语法「{}」，请先在文件开头导入：导入 \"lightWeb\"",
+                what
+            ))
         }
     }
 
@@ -714,4 +854,47 @@ impl Parser {
             other => Err(format!("第 {} 行：意外的 token {}", t.line, other)),
         }
     }
+}
+
+/// 可用的类型标注名称
+pub fn is_type_name(name: &str) -> bool {
+    matches!(
+        name,
+        "整数" | "浮点" | "字符串" | "布尔" | "列表" | "数组" | "元组" | "字典" | "空" | "任意"
+    )
+}
+
+/// 全部页面元素名（用于提示信息）
+pub fn page_element_names() -> Vec<&'static str> {
+    vec![
+        "标题", "段落", "按钮", "链接", "图片", "输入框", "文本域", "复选框", "单选框", "下拉框",
+        "列表", "表格", "分隔线", "卡片", "标签", "进度条", "代码块", "提示", "容器", "结束",
+    ]
+}
+
+/// 页面元素名（与 lightweb 的 elements 模块保持一致）
+pub fn is_page_element(name: &str) -> bool {
+    matches!(
+        name,
+        "标题"
+            | "段落"
+            | "按钮"
+            | "链接"
+            | "图片"
+            | "输入框"
+            | "文本域"
+            | "复选框"
+            | "单选框"
+            | "下拉框"
+            | "列表"
+            | "表格"
+            | "分隔线"
+            | "卡片"
+            | "标签"
+            | "进度条"
+            | "代码块"
+            | "提示"
+            | "容器"
+            | "结束"
+    )
 }
