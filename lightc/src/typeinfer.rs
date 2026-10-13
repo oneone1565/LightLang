@@ -36,6 +36,10 @@ pub struct TypeEnv {
     pub return_types: HashMap<String, Ty>,
     /// 函数名 -> 参数名列表（供分析时把标识符解析到参数类型）
     pub param_names: HashMap<String, Vec<String>>,
+    /// 顶层变量名 -> 该列表的元素类型。
+    /// 元素类型已知时，下标直接按静态类型取值，不必再过运行期标签
+    /// （标签占 8 位、载荷只剩 56 位，浮点位型需要满 64 位，会被截断）。
+    pub list_elems: HashMap<String, Ty>,
 }
 
 /// 单次遍历中收集到的约束
@@ -62,6 +66,8 @@ pub fn infer(program: &Program) -> TypeEnv {
         }
     }
 
+    let mut top_list_elems: HashMap<String, Ty> = HashMap::new();
+
     // 不动点迭代
     for _ in 0..50 {
         let mut changed = false;
@@ -75,6 +81,17 @@ pub fn infer(program: &Program) -> TypeEnv {
         for item in &program.items {
             if let Item::Stmt(stmt) = item {
                 collect_locals_stmt(stmt, &mut top_locals, &env, "<top>");
+            }
+        }
+        // 顶层列表变量的元素类型：同构时才有意义，供下标走静态取值
+        for item in &program.items {
+            if let Item::Stmt(Stmt::Let { name, value }) = item {
+                if let Expr::List(items) = value {
+                    let elem = list_elem_type(items, &top_locals, &env, "<top>");
+                    if elem != Ty::Unknown {
+                        top_list_elems.insert(name.clone(), elem);
+                    }
+                }
             }
         }
         for item in &program.items {
@@ -101,6 +118,8 @@ pub fn infer(program: &Program) -> TypeEnv {
             break;
         }
     }
+
+    env.list_elems = top_list_elems;
 
     // 收尾：Unknown 兜底为 Int
     for v in env.param_types.values_mut() {
@@ -408,6 +427,30 @@ fn binop_builtin_hint(name: &str, args: &[Expr], locals: &HashMap<String, Ty>,
 }
 
 /// 推断表达式类型（只读）
+/// 列表字面量的元素类型：所有元素类型一致才有意义，否则退回 Unknown。
+/// 元组允许异质，所以直接返回 Unknown（沿用原有的塌缩取值）。
+pub fn list_elem_type(
+    items: &[Expr],
+    locals: &HashMap<String, Ty>,
+    env: &TypeEnv,
+    fname: &str,
+) -> Ty {
+    let mut elem: Option<Ty> = None;
+    for item in items {
+        let t = expr_type(item, locals, env, fname);
+        // 动态值先不参与判定：它可能是任何类型
+        if matches!(t, Ty::Unknown) {
+            continue;
+        }
+        match &elem {
+            None => elem = Some(t),
+            Some(prev) if *prev == t => {}
+            Some(_) => return Ty::Unknown,
+        }
+    }
+    elem.unwrap_or(Ty::Unknown)
+}
+
 pub fn expr_type(expr: &Expr, locals: &HashMap<String, Ty>, env: &TypeEnv, fname: &str) -> Ty {
     match expr {
         Expr::Int(_) => Ty::Int,

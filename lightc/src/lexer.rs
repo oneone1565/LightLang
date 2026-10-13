@@ -55,6 +55,7 @@ pub enum TokenKind {
     Eq,          // ==
     Neq,         // !=
     Lt,          // <
+    Shl,         // <<
     Gt,          // >
     Le,          // <=
     Ge,          // >=
@@ -129,6 +130,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Eq => write!(f, "=="),
             TokenKind::Neq => write!(f, "!="),
             TokenKind::Lt => write!(f, "<"),
+        TokenKind::Shl => write!(f, "<<"),
             TokenKind::Gt => write!(f, ">"),
             TokenKind::Le => write!(f, "<="),
             TokenKind::Ge => write!(f, ">="),
@@ -459,11 +461,17 @@ impl Lexer {
                 }
                 '<' => {
                     self.bump();
-                    if self.peek() == Some('=') {
-                        self.bump();
-                        Token { kind: TokenKind::Le, line, _col: col }
-                    } else {
-                        Token { kind: TokenKind::Lt, line, _col: col }
+                    match self.peek() {
+                        Some('=') => {
+                            self.bump();
+                            Token { kind: TokenKind::Le, line, _col: col }
+                        }
+                        // '<<' 是左移；"<真" 是布尔字面量，两者必须区分
+                        Some('<') => {
+                            self.bump();
+                            Token { kind: TokenKind::Shl, line, _col: col }
+                        }
+                        _ => Token { kind: TokenKind::Lt, line, _col: col },
                     }
                 }
                 '>' => {

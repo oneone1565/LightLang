@@ -396,6 +396,48 @@ impl<'a> CodeGen<'a> {
 
     /// 元素属性的值：统一按 i64 传递，浮点做 bitcast
     /// （指针类值在 Light 的 ABI 里本来就是 i64）
+    /// 取下标容器的静态元素类型：变量查旁表，字面量就地判断。
+    /// 拿不到返回 None，调用方退回运行期标签路径。
+    fn static_list_elem(&self, arr: &Expr) -> Option<Ty> {
+        match arr {
+            Expr::Ident(name) => self.env.list_elems.get(name).map(|t| Ty::from(t.clone())),
+            Expr::List(items) if !items.is_empty() => {
+                let mut elem: Option<Ty> = None;
+                for item in items {
+                    let t = Self::literal_type(item);
+                    let t = match t {
+                        Some(t) => t,
+                        None => return None,
+                    };
+                    if t == Ty::Unknown {
+                        continue;
+                    }
+                    match &elem {
+                        None => elem = Some(t),
+                        Some(prev) if *prev == t => {}
+                        Some(_) => return None,
+                    }
+                }
+                elem
+            }
+            _ => None,
+        }
+    }
+
+    /// 字面量的静态类型；非字面量或类型不定返回 None
+    fn literal_type(expr: &Expr) -> Option<Ty> {
+        Some(match expr {
+            Expr::Int(_) => Ty::Int,
+            Expr::Float(_) => Ty::Float,
+            Expr::Bool(_) => Ty::Bool,
+            Expr::Str(_) => Ty::Str,
+            Expr::List(_) => Ty::List,
+            Expr::Dict(_) => Ty::Dict,
+            // 元组可异构，元素类型不静态可知，交给运行期标签
+            _ => return None,
+        })
+    }
+
     fn tagged_i64(&mut self, val: &str, ty: &Ty) -> String {
         self.value_as_i64(val, ty)
     }
@@ -1886,6 +1928,35 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 self.gen_call(name, args, scopes)
             }
             Expr::Index { arr, idx } => {
+                // 元素类型静态已知时走直达路径：运行期标签要占 8 位，
+                // 浮点位型需要满 64 位，塌缩成单个 i64 会被截断
+                if let Some(elem) = self.static_list_elem(arr) {
+                    if !matches!(elem, Ty::Unknown) {
+                        let (arr_reg, arr_ty) = self.gen_expr(arr, scopes)?;
+                        if matches!(arr_ty, Ty::Array | Ty::List) {
+                            let (idx_reg, idx_ty) = self.gen_expr(idx, scopes)?;
+                            let ap = self.i64_to_ptr(&arr_reg);
+                            let idx_i = self.value_as_i64(&idx_reg, &idx_ty);
+                            let raw = self.fresh();
+                            self.emit(&format!(
+                                "  {} = call i64 @light_array_get(ptr {}, i64 {})",
+                                raw, ap, idx_i
+                            ));
+                            if elem.is_float() {
+                                let d = self.fresh();
+                                self.emit(&format!("  {} = bitcast i64 {} to double", d, raw));
+                                if !matches!(arr.as_ref(), Expr::Ident(_)) {
+                                    self.emit(&format!(
+                                        "  call void @light_array_free(ptr {})",
+                                        ap
+                                    ));
+                                }
+                                return Ok((d, Ty::Float));
+                            }
+                            return Ok((raw, elem));
+                        }
+                    }
+                }
                 let (arr_reg, arr_ty) = self.gen_expr(arr, scopes)?;
                 let (idx_reg, idx_ty) = self.gen_expr(idx, scopes)?;
                 match arr_ty {

@@ -783,7 +783,28 @@ impl Parser {
             TokenKind::False => Ok(Expr::Bool(false)),
             TokenKind::None => Ok(Expr::None),
             TokenKind::Ident(s) => Ok(Expr::Ident(s)),
+            // 尖括号包住真假值：<真> / <假>
+            TokenKind::Lt => {
+                let inner = self.bump().kind;
+                let value = match inner {
+                    TokenKind::True => true,
+                    TokenKind::False => false,
+                    other => {
+                        return Err(format!(
+                            "尖括号里只放真或假，得到 {}",
+                            other
+                        ))
+                    }
+                };
+                self.expect(TokenKind::Gt)?;
+                Ok(Expr::Bool(value))
+            }
             TokenKind::LParen => {
+                // 空括号就是空元组 ()
+                if matches!(self.peek_kind(), TokenKind::RParen) {
+                    self.bump();
+                    return Ok(Expr::Tuple(Vec::new()));
+                }
                 let mut items = Vec::new();
                 items.push(self.parse_expr()?);
                 let mut has_comma = false;
