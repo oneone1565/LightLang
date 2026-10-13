@@ -426,7 +426,7 @@ fn is_builtin(name: &str) -> bool {
         | "读取文件" | "写入文件" | "追加文件" | "文件存在"
         | "执行" | "环境变量" | "退出" | "字符"
         | "反转" | "索引" | "排序" | "连接" | "数组"
-        | "路由" | "启动" | "请求方法" | "请求路径" | "请求体" | "请求头"
+        | "路由" | "网页路由" | "启动" | "请求方法" | "请求路径" | "请求体" | "请求头"
         | "等待全部")
 }
 
@@ -594,7 +594,7 @@ pub fn expr_type(expr: &Expr, locals: &HashMap<String, Ty>, env: &TypeEnv, fname
                 "排序" => return Ty::None,
                 "退出" => return Ty::None,
                 "字符" => return Ty::Str,
-                "路由" | "启动" => return Ty::Int(IntWidth::I64),
+                "路由" | "网页路由" | "启动" => return Ty::Int(IntWidth::I64),
                 "请求方法" | "请求路径" | "请求体" | "请求头" => return Ty::Str,
                 _ => {}
             }

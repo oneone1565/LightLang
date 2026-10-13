@@ -2483,7 +2483,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         Ok((reg, data, len))
     }
 
-    fn gen_web_route(&mut self, args: &[Expr], scopes: &mut Vec<Scope>) -> Result<(String, Ty), String> {
+    fn gen_web_route(&mut self, args: &[Expr], scopes: &mut Vec<Scope>, html_response: bool) -> Result<(String, Ty), String> {
         if args.len() != 3 {
             return Err("路由 需要方法、路径和处理器".into());
         }
@@ -2509,9 +2509,15 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         let (method_reg, _, _) = self.gen_string_parts(&args[0], scopes)?;
         let (path_reg, path_data, path_len) = self.gen_string_parts(&args[1], scopes)?;
         let status = self.fresh();
+        let fn_symbol = if html_response {
+            "light_web_register_html_v1"
+        } else {
+            "light_web_register_v1"
+        };
         self.emit(&format!(
-            "  {} = call i64 @light_web_register_v1(i32 {}, ptr {}, i64 {}, ptr @{})",
+            "  {} = call i64 @{}(i32 {}, ptr {}, i64 {}, ptr @{})",
             status,
+            fn_symbol,
             method_code,
             path_data,
             path_len,
@@ -2644,7 +2650,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 if !args.is_empty() {
                     return Err(format!("{} 不需要参数", name));
                 }
-                let fn_name = if name == "元素结束" {
+                let fn_name = if name == "页元素结束" {
                     "light_page_element_end"
                 } else {
                     "light_page_element_close"
@@ -2807,7 +2813,8 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         };
         let name = resolved.as_str();
         match name {
-            "路由" => return self.gen_web_route(args, scopes),
+            "路由" => return self.gen_web_route(args, scopes, false),
+            "网页路由" => return self.gen_web_route(args, scopes, true),
             "启动" => return self.gen_web_run(args, scopes),
             "页面重置" | "页面语言" | "页面主题" | "追加样式"
             | "页元素开始" | "页元素文本" | "页元素属性" | "页元素结束" | "页元素闭合" => {
