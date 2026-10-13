@@ -1,6 +1,6 @@
 [package]
 name = "light-installer"
-version = "0.2.1"
+version = "1.0.0"
 edition = "2021"
 description = "LightLang 自解压安装程序：内嵌发行包，运行后解压并执行安装"
 

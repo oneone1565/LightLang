@@ -1,6 +1,6 @@
 [package]
 name = "elements_demo"
-version = "0.2.1"
+version = "1.0.0"
 entry = "src/main.light"
 
 [[ffi]]

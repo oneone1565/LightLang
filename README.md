@@ -69,7 +69,7 @@ light
 ```
 
 ```text
-LightLang 0.2.1 交互模式（输入 退出 结束会话，输入 帮助 查看命令）
+LightLang 1.0.0 交互模式（输入 退出 结束会话，输入 帮助 查看命令）
 >>> 名字 = "LightLang"
 >>> 打印 "你好，" + 名字
 你好，LightLang
@@ -223,27 +223,27 @@ cargo build --release
 发行包提供一个自解压的 Linux ELF 安装程序，双击（执行）即可完成安装：
 
 ```bash
-./light-lang-0.2.1-linux-x86_64-installer
+./light-lang-1.0.0-linux-x86_64-installer
 ```
 
 它会把内嵌的发行包释放到临时目录，执行其中的 `install.sh`，结束后自动清理临时文件。
 
 ```bash
 # 安装到指定位置并跳过确认
-./light-lang-0.2.1-linux-x86_64-installer --prefix "$HOME/.local" -y
+./light-lang-1.0.0-linux-x86_64-installer --prefix "$HOME/.local" -y
 
 # 只释放安装包、不执行安装
-./light-lang-0.2.1-linux-x86_64-installer --target /tmp/lightlang
+./light-lang-1.0.0-linux-x86_64-installer --target /tmp/lightlang
 
 # 卸载
-./light-lang-0.2.1-linux-x86_64-installer --uninstall --prefix "$HOME/.local" -y
+./light-lang-1.0.0-linux-x86_64-installer --uninstall --prefix "$HOME/.local" -y
 ```
 
 ### 使用发行包
 
 ```bash
-tar -xzf light-lang-0.2.1-linux-x86_64.tar.gz
-cd light-lang-0.2.1
+tar -xzf light-lang-1.0.0-linux-x86_64.tar.gz
+cd light-lang-1.0.0
 ./install.sh
 ```
 
@@ -329,7 +329,7 @@ Windows 版二进制由 MinGW（`x86_64-pc-windows-gnu`）交叉编译，不依�
 
 ```bash
 ./scripts/package-win.sh
-# 产物：dist/LightLang-0.2.1-windows-x64-setup.exe
+# 产物：dist/LightLang-1.0.0-windows-x64-setup.exe
 ```
 
 双击打开图形安装界面：选择安装目录（程序目录 / 用户目录）、安装、卸载，状态实时显示。
@@ -358,7 +358,7 @@ rustup target add x86_64-pc-windows-gnu
 
 ```bash
 ./scripts/package-msi.sh
-# 产物：dist/LightLang-0.2.1-windows-x64.msi
+# 产物：dist/LightLang-1.0.0-windows-x64.msi
 ```
 
 脚本会自动选工具链：
@@ -373,11 +373,11 @@ rustup target add x86_64-pc-windows-gnu
 ```powershell
 wix extension add WixToolset.UI
 wix build packaging/windows/Product.wxs -arch x64 `
-    -d ProductVersion=0.2.1 `
+    -d ProductVersion=1.0.0 `
     -d WixUI=1 `
     -d Shortcuts=1 `
     -d SourceDir=<素材目录> `
-    -o dist/LightLang-0.2.1-windows-x64.msi
+    -o dist/LightLang-1.0.0-windows-x64.msi
 ```
 
 > 为什么 wine 下没有向导：WixUI 的对话框与开始菜单快捷方式都要通过
@@ -424,7 +424,7 @@ nlightGo 构建
 ```toml
 [package]
 name = "demo"
-version = "0.2.1"
+version = "1.0.0"
 entry = "src/main.light"
 ```
 
@@ -459,7 +459,7 @@ Rust crate 不能直接被 Light 函数调用，因为 Rust 的 ABI、泛型和�
 ```toml
 [package]
 name = "sha2_ffi"
-version = "0.2.1"
+version = "1.0.0"
 edition = "2021"
 
 [lib]
@@ -496,7 +496,7 @@ pub extern "C" fn light_sha256_prefix32(s: *const c_void) -> i64 {
 ```toml
 [package]
 name = "sha2_demo"
-version = "0.2.1"
+version = "1.0.0"
 entry = "src/main.light"
 
 [[ffi]]

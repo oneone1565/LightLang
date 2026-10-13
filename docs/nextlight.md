@@ -125,12 +125,17 @@ scripts/build-nlightrt.sh   # 构建 nlightRT（Light -> .ll -> 包装 -> .a）
 scripts/nrt-test.sh         # nlightRT 与 Rust 运行时的输出一致性对比
 ```
 
-当前状态：`scripts/nrt-test.sh` 23 个示例里 21 个与参考实现输出逐字节一致，
-`scripts/corpus.sh` 23 个一致，`scripts/bootstrap.sh` 定点成立。
+当前状态：`scripts/nrt-test.sh` 23 个示例里 19 个与参考实现输出逐字节一致，
+不一致 5、两边都异常退出 3；`scripts/corpus.sh` 23 个一致，
+`scripts/bootstrap.sh` 定点成立。
 
 已知差异：
 
-- `array.lt`：两边都会在越界时终止，但提示里的运行时名不同（`lightrt` / `nlightRT`）
+- `all_features.lt` / `dynamic.lt` / `ops.light`：浮点结果在 nlightRT 侧变成
+  `2.85e-308` 一类非规格化数。根因是带标签值的载荷只有 56 位（标签占高 8 位），
+  而 double 位型需要满 64 位，走带标签路径时被截断。要修得改 lightrt 的值编码格式。
+- `array.lt`：两边都会在越界时安全终止（不破坏内存），但提示里的运行时名不同
+  （`lightrt` / `nlightRT`）
 - `threads.light`：多线程输出的交错顺序不固定
-- `noleak*.lt`：依赖 `lightrt_live_*` 存活计数，nlightRT 侧目前返回 0
+- `noleak*.lt`：依赖 `lightrt_live_*` 存活计数，nlightRT 侧未实现这些符号，返回 0
 - `ffi*.light`：需要 Rust 侧的 `.rs` 原生模块，自举链不支持

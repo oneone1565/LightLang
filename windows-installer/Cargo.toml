@@ -1,6 +1,6 @@
 [package]
 name = "windows-installer"
-version = "0.2.1"
+version = "1.0.0"
 edition = "2021"
 description = "LightLang Windows 图形安装程序（自解压，MinGW 构建）"
 

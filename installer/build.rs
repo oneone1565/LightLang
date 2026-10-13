@@ -23,7 +23,10 @@ fn main() {
     candidates.push(default_package.clone());
 
     println!("cargo:rerun-if-changed={}", default_package.display());
-    println!("cargo:rerun-if-changed={}", dist.join("light-lang-0.2.1-linux-aarch64.tar.gz").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        dist.join(format!("light-lang-{}-linux-aarch64.tar.gz", version)).display()
+    );
 
     let target = out_dir.join("package.tar.gz");
     match candidates.iter().find(|path| path.is_file()) {
