@@ -268,7 +268,7 @@ impl Lexer {
     }
 
     /// 读取数字，返回整数或浮点（用 Result 区分）
-    fn read_number(&mut self) -> TokenKind {
+    fn read_number(&mut self) -> Result<TokenKind, String> {
         let mut s = String::new();
         let mut is_float = false;
         while let Some(c) = self.peek() {
@@ -289,9 +289,19 @@ impl Lexer {
             }
         }
         if is_float {
-            TokenKind::Float(s.parse().unwrap_or(0.0))
+            s.parse::<f64>().map(TokenKind::Float).map_err(|_| {
+                format!("浮点数无法表示：{}", s)
+            })
         } else {
-            TokenKind::Int(s.parse().unwrap_or(0))
+            // 越界必须报错：静默归零会让程序跑出完全错误的结果
+            s.parse::<i64>().map(TokenKind::Int).map_err(|_| {
+                format!(
+                    "整数 {} 超出 64 位有符号范围（-{} ~ {}），请拆分或改写",
+                    s,
+                    i64::MIN.unsigned_abs(),
+                    i64::MAX
+                )
+            })
         }
     }
 
@@ -498,7 +508,7 @@ impl Lexer {
                     Token { kind: TokenKind::Str(s), line, _col: col }
                 }
                 c if c.is_ascii_digit() => {
-                    let kind = self.read_number();
+                    let kind = self.read_number()?;
                     Token { kind, line, _col: col }
                 }
                 c if Self::is_ident_start(c) => {
