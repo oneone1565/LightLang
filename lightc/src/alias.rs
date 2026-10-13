@@ -22,11 +22,6 @@ pub fn resolve(name: &str) -> String {
     }
 }
 
-/// 当前登记了多少条别名；为 0 时词法器可以完全跳过查表。
-pub fn count() -> usize {
-    table().read().map(|t| t.len()).unwrap_or(0)
-}
-
 /// 解析 `.llang`：每行一条 `别名 : 原名`，`#` 开头是注释。返回读到的条数。
 pub fn load_llang(source: &str) -> Result<usize, String> {
     let mut count = 0usize;

@@ -523,13 +523,6 @@ impl<'a> CodeGen<'a> {
         !matches!(e, Expr::Ident(_) | Expr::Index { .. })
     }
 
-    /// 释放表达式产生的临时值（变量、下标读不释放）
-    fn free_temp(&mut self, e: &Expr, val: &str, ty: &Ty) {
-        if Self::is_temp(e) {
-            self.free_value(val, ty);
-        }
-    }
-
     fn value_tag(ty: &Ty) -> i32 {
         match ty {
             Ty::Int(..) => 0,
@@ -2751,7 +2744,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         if args.is_empty() {
             return Err(format!("{} 需要请求参数", name));
         }
-        let (request, request_ty) = self.gen_expr(&args[0], scopes)?;
+        let (request, _request_ty) = self.gen_expr(&args[0], scopes)?;
         if name == "请求头" || name == "请求参数" {
             if args.len() != 2 {
                 return Err(format!("{} 需要请求和名称", name));
@@ -3236,8 +3229,8 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             }
             "随机整数" => {
                 if args.len() != 2 { return Err("随机整数 需要 2 个参数".into()); }
-                let (a, a_ty) = self.gen_expr(&args[0], scopes)?;
-                let (b, b_ty) = self.gen_expr(&args[1], scopes)?;
+                let (a, _a_ty) = self.gen_expr(&args[0], scopes)?;
+                let (b, _b_ty) = self.gen_expr(&args[1], scopes)?;
                 let r = self.fresh();
                 self.emit(&format!("  {} = call i64 @light_math_random_int(i64 {}, i64 {})", r, a, b));
                 return Ok((r, Ty::Int(I64W)));
@@ -3246,7 +3239,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             "查找" => {
                 if args.len() != 2 { return Err("查找 需要 2 个参数".into()); }
                 let (s, sty) = self.gen_expr(&args[0], scopes)?;
-                let (sub, sub_ty) = self.gen_expr(&args[1], scopes)?;
+                let (sub, _sub_ty) = self.gen_expr(&args[1], scopes)?;
                 if sty != Ty::Str { return Err("查找 第一个参数必须是字符串".into()); }
                 let sp = self.i64_to_ptr(&s);
                 let subp = self.i64_to_ptr(&sub);
@@ -3290,7 +3283,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 if args.len() != 2 { return Err("包含 需要 2 个参数".into()); }
                 let (s, sty) = self.gen_expr(&args[0], scopes)?;
                 if sty == Ty::Str {
-                    let (sub, sub_ty) = self.gen_expr(&args[1], scopes)?;
+                    let (sub, _sub_ty) = self.gen_expr(&args[1], scopes)?;
                     let sp = self.i64_to_ptr(&s);
                     let subp = self.i64_to_ptr(&sub);
                     let r = self.fresh();
@@ -3354,8 +3347,8 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             "替换" => {
                 if args.len() != 3 { return Err("替换 需要 3 个参数".into()); }
                 let (s, sty) = self.gen_expr(&args[0], scopes)?;
-                let (old, old_ty) = self.gen_expr(&args[1], scopes)?;
-                let (new, new_ty) = self.gen_expr(&args[2], scopes)?;
+                let (old, _old_ty) = self.gen_expr(&args[1], scopes)?;
+                let (new, _new_ty) = self.gen_expr(&args[2], scopes)?;
                 if sty != Ty::Str { return Err("替换 第一个参数必须是字符串".into()); }
                 let sp = self.i64_to_ptr(&s);
                 let oldp = self.i64_to_ptr(&old);
@@ -3377,7 +3370,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             "分割" => {
                 if args.len() != 2 { return Err("分割 需要 2 个参数".into()); }
                 let (s, sty) = self.gen_expr(&args[0], scopes)?;
-                let (sep, sep_ty) = self.gen_expr(&args[1], scopes)?;
+                let (sep, _sep_ty) = self.gen_expr(&args[1], scopes)?;
                 if sty != Ty::Str { return Err("分割 第一个参数必须是字符串".into()); }
                 let sp = self.i64_to_ptr(&s);
                 let sepp = self.i64_to_ptr(&sep);
@@ -3395,7 +3388,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             "合并" => {
                 if args.len() != 2 { return Err("合并 需要 2 个参数（数组, 分隔符）".into()); }
                 let (mut arr, aty) = self.gen_expr(&args[0], scopes)?;
-                let (sep, sep_ty) = self.gen_expr(&args[1], scopes)?;
+                let (sep, _sep_ty) = self.gen_expr(&args[1], scopes)?;
                 // 运行期才知道类型的值可能带标签，先解标签
                 if aty == Ty::Unknown { arr = self.untag(&arr); }
                 if !matches!(aty, Ty::Array | Ty::List | Ty::Unknown) { return Err("合并 第一个参数必须是数组".into()); }
@@ -3633,6 +3626,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             "内存分配" => {
                 if args.len() != 1 { return Err("内存分配 需要 1 个参数（字节数）".into()); }
                 let (n, n_ty) = self.gen_expr(&args[0], scopes)?;
+                let n = self.value_as_i64(&n, &n_ty);
                 let r = self.fresh();
                 self.emit(&format!("  {} = call i64 @light_mem_alloc(i64 {})", r, n));
                 return Ok((r, Ty::Int(I64W)));
@@ -3640,6 +3634,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             "内存释放" => {
                 if args.len() != 1 { return Err("内存释放 需要 1 个地址".into()); }
                 let (p, p_ty) = self.gen_expr(&args[0], scopes)?;
+                let p = self.value_as_i64(&p, &p_ty);
                 self.emit(&format!("  call void @light_mem_free(i64 {})", p));
                 let r = self.fresh();
                 self.emit(&format!("  {} = add i64 0, 0", r));
@@ -3648,8 +3643,11 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             "内存复制" => {
                 if args.len() != 3 { return Err("内存复制 需要 3 个参数（目标, 源, 字节数）".into()); }
                 let (d, d_ty) = self.gen_expr(&args[0], scopes)?;
-                let (s2, _) = self.gen_expr(&args[1], scopes)?;
+                let (s2, s2_ty) = self.gen_expr(&args[1], scopes)?;
                 let (n, n_ty) = self.gen_expr(&args[2], scopes)?;
+                let d = self.value_as_i64(&d, &d_ty);
+                let s2 = self.value_as_i64(&s2, &s2_ty);
+                let n = self.value_as_i64(&n, &n_ty);
                 let r = self.fresh();
                 self.emit(&format!("  {} = call i64 @light_mem_copy(i64 {}, i64 {}, i64 {})", r, d, s2, n));
                 return Ok((r, Ty::Int(I64W)));
@@ -3658,6 +3656,8 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 if args.len() != 2 { return Err("内存置零 需要 2 个参数（地址, 字节数）".into()); }
                 let (p, p_ty) = self.gen_expr(&args[0], scopes)?;
                 let (n, n_ty) = self.gen_expr(&args[1], scopes)?;
+                let p = self.value_as_i64(&p, &p_ty);
+                let n = self.value_as_i64(&n, &n_ty);
                 self.emit(&format!("  call void @light_mem_zero(i64 {}, i64 {})", p, n));
                 let r = self.fresh();
                 self.emit(&format!("  {} = add i64 0, 0", r));
@@ -3666,6 +3666,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             "内存整数" => {
                 if args.len() != 1 { return Err("内存整数 需要 1 个地址".into()); }
                 let (p, p_ty) = self.gen_expr(&args[0], scopes)?;
+                let p = self.value_as_i64(&p, &p_ty);
                 let r = self.fresh();
                 self.emit(&format!("  {} = call i64 @light_mem_load(i64 {})", r, p));
                 return Ok((r, Ty::Int(I64W)));
@@ -3674,6 +3675,8 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 if args.len() != 2 { return Err("存内存整数 需要 2 个参数（地址, 值）".into()); }
                 let (p, p_ty) = self.gen_expr(&args[0], scopes)?;
                 let (v, v_ty) = self.gen_expr(&args[1], scopes)?;
+                let p = self.value_as_i64(&p, &p_ty);
+                let v = self.value_as_i64(&v, &v_ty);
                 self.emit(&format!("  call void @light_mem_store(i64 {}, i64 {})", p, v));
                 let r = self.fresh();
                 self.emit(&format!("  {} = add i64 0, 0", r));
@@ -3682,6 +3685,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             "内存字节" => {
                 if args.len() != 1 { return Err("内存字节 需要 1 个地址".into()); }
                 let (p, p_ty) = self.gen_expr(&args[0], scopes)?;
+                let p = self.value_as_i64(&p, &p_ty);
                 let r = self.fresh();
                 self.emit(&format!("  {} = call i64 @light_mem_load8(i64 {})", r, p));
                 return Ok((r, Ty::Int(I64W)));
@@ -3690,6 +3694,8 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 if args.len() != 2 { return Err("存内存字节 需要 2 个参数（地址, 值）".into()); }
                 let (p, p_ty) = self.gen_expr(&args[0], scopes)?;
                 let (v, v_ty) = self.gen_expr(&args[1], scopes)?;
+                let p = self.value_as_i64(&p, &p_ty);
+                let v = self.value_as_i64(&v, &v_ty);
                 self.emit(&format!("  call void @light_mem_store8(i64 {}, i64 {})", p, v));
                 let r = self.fresh();
                 self.emit(&format!("  {} = add i64 0, 0", r));

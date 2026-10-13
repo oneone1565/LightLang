@@ -1439,6 +1439,9 @@
 函数 light_page_element_end():
     返回 0
 
+函数 light_page_element_close():
+    返回 0
+
 函数 light_page_element_text(文本: 整数):
     返回 0
 

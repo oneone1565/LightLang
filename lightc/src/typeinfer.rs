@@ -20,6 +20,8 @@ use crate::ast::*;
 pub enum IntWidth {
     I32,
     I64,
+    /// 宽整数预留位；受 lightrt 带标签值 56 位载荷限制，暂无法构造
+    #[allow(dead_code)]
     I128,
 }
 
@@ -46,14 +48,6 @@ impl IntWidth {
             IntWidth::I32
         } else {
             IntWidth::I64
-        }
-    }
-
-    /// 收窄到本宽度：把更宽的值截回
-    pub fn narrow(self, v: i64) -> i64 {
-        match self {
-            IntWidth::I32 => v as i32 as i64,
-            _ => v,
         }
     }
 }

@@ -1431,8 +1431,6 @@ pub extern "C" fn light_dict_set(d: *mut LightDict, ktag: i32, k: i64, vtag: i32
     }
 }
 
-/// 返回键数组（深拷贝），供 for-in 遍历；调用方负责释放。
-#[no_mangle]
 /// 字典取值：统一返回文本形式（值本身带标签，转成可读文本）
 #[no_mangle]
 pub extern "C" fn light_dict_get_text(d: *const LightDict, ktag: i32, k: i64) -> *mut LightStr {

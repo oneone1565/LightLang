@@ -28,13 +28,21 @@ rm -f "$work/diff.log"
 same=0; diff_out=0; both_fail=0
 declare -a notes=()
 
+web_lib="target/release/liblightweb.a"
+
 build() { # $1=源文件 $2=输出前缀 $3=额外链接参数
 	local src="$1" prefix="$2"
 	local base="$(basename "$src" | tr '.' '_')"
 	# --emit-llvm 把 IR 写到 stdout
 	( cd "$(dirname "$src")" && nlightc "$(basename "$src")" --emit-llvm --no-link ) > "$work/$base.ll" 2>/dev/null || return 1
 	[ -s "$root_dir/$work/$base.ll" ] || return 1
-	clang "$root_dir/$work/$base.ll" $3 -lstdc++ -lpthread -lm -o "$prefix" 2>/dev/null || return 1
+	# 页面/网页语法要用到 lightWeb 的符号（light_page_*、light_web_*）；
+	# 它依赖 lightrt，排在运行时之后。两个 Rust 静态库各带一份 std 符号，
+	# 与 nlightc 自身的链接做法一致：允许重复定义，先出现的那份生效。
+	local web="$root_dir/$web_lib"
+	[ -f "$web" ] || web=""
+	clang "$root_dir/$work/$base.ll" $3 ${web:+"$web"} -lstdc++ -lpthread -lm \
+		-Wl,--allow-multiple-definition -o "$prefix" 2>/dev/null || return 1
 	return 0
 }
 
