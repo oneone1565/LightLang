@@ -1,0 +1,70 @@
+导入 "lightWeb"
+
+# LightLang 官网首页
+#
+#   nlightc examples/landing.light --page-out /tmp/index.html -o /tmp/landing
+#   /tmp/landing            # 运行后写出 HTML，可直接用浏览器打开
+
+页面(标题="LightLang —— 用中文写程序", 图标="none"):
+
+    让 主题 = "light"
+    让 语言 = "zh-cn"
+    让 样式 = ":root{--lw-max:1120px}body>*{max-width:var(--lw-max);margin-left:auto;margin-right:auto}h1{font-size:2.1rem;letter-spacing:-.02em;margin:.2rem 0}.lw-lead{opacity:.7;font-size:1.05rem;margin-top:-.4rem}.lw-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:1rem;margin:1rem 0}.lw-grid .lw-card{margin:0}.lw-card-title{margin:0 0 .5rem;font-size:1.05rem}h2{margin-top:2rem}table{font-size:.93rem}th{font-weight:600}.lw-progress{margin:.2rem 0 .9rem}"
+
+    标题 "LightLang" 级别=1
+    段落 "用中文写程序，编译成原生机器码。" 类名="lw-lead"
+    标签 "稳定版 1.0" 颜色="绿"
+    标签 "零依赖" 颜色="蓝"
+    标签 "静态编译" 颜色="黄"
+
+    按钮 "立即开始" 动作="/start" 方式=get 样式=主要
+    按钮 "查看文档" 动作="/docs" 样式=次要
+    按钮 "源码仓库" 动作="https://gitcode.com/NomiLight2026/lightLang" 样式=链接
+
+    分隔线
+
+    标题 "为什么是 LightLang" 级别=2
+    段落 "整条工具链都能用同一种语言重写——编译器、运行时、工程工具，都是 Light 写的。"
+
+    容器 元素=div 类名="lw-grid":
+        卡片 标题="自举编译器" 内容="编译器用 Light 实现，能编译自己并保持定点。"
+        卡片 标题="双运行时" 内容="Rust 版与 Light 版运行时输出逐字节一致，互为验证。"
+        卡片 标题="中文网页" 内容="页面元素直接用中文写，编译期导出静态 HTML。"
+
+    分隔线
+
+    标题 "一段 Hello World" 级别=2
+    代码块 "函数 阶乘(n: 整数) -> 整数:\n    如果 n <= 1:\n        返回 1\n    返回 n * 阶乘(n - 1)\n\n函数 main():\n    打印 阶乘(10)\n    返回 0"
+    段落 "运行结果"
+    代码块 "3628800"
+
+    标题 "语言能力" 级别=2
+    表格 表头=["能力", "说明", "状态"] 行=[["整数自动选宽", "字面量按值选 i32 或 i64，栈槽与 ABI 保持 i64", "完成"], ["类型安全 FFI", "原生模块自动注入桥接层，写 Rust 不用手写 extern", "完成"], ["别名机制", "每行一条 别名 : 原名，中英文写法等价", "完成"], ["双精度", "容器元素走满 64 位路径，不再被标签截断", "受限于带标签值"]]
+
+    标题 "构建与验证" 级别=2
+    段落 "每个改动都要过四道闸门"
+    列表 项目=["自举定点——stage2 与 stage3 生成的 IR 逐字节一致", "差分回归——stage1 与 stage2 对同一语料生成同样的 IR", "双运行时对比——同一批示例输出逐字节一致", "示例编译——全部示例都能编译运行"]
+
+    标题 "工程进度" 级别=2
+    段落 "自举编译器"
+    进度条 值=100 最大=100
+    段落 "双运行时一致性"
+    进度条 值=86 最大=100
+    段落 "类型安全 FFI"
+    进度条 值=72 最大=100
+    段落 "宽整数（受 56 位载荷限制）"
+    进度条 值=35 最大=100
+
+    分隔线
+
+    标题 "订阅更新" 级别=2
+    提示 "我们只在发布新版本时发信。" 级别=信息
+
+    输入框 名称="email" 占位提示="你的邮箱" 类型="email"
+    按钮 "订阅" 动作="/subscribe" 方式=post 样式=主要
+
+    复选框 "我同意接收更新" 名称="agree"
+    文本域 名称="留言" 占位提示="想说什么都可以" 行数=3
+
+    分隔线
+    段落 "由 LightLang 1.0.0 生成"

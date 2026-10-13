@@ -452,12 +452,13 @@ pub fn render_element(element: &Element) -> String {
         }
         KIND_CONTAINER => {
             let tag = container_tag(element);
-            let mut html = format!("<{} class=\"lw-container\"", tag);
+            let mut html = format!("<{} class=\"lw-container", tag);
+            if let Some(class) = element.attr("类名") {
+                html.push_str(&format!(" {}", escape(&class)));
+            }
+            html.push('"');
             if let Some(id) = element.attr("名称") {
                 html.push_str(&format!(" id=\"{}\"", escape(&id)));
-            }
-            if let Some(class) = element.attr("类名") {
-                html.push_str(&format!(" data-class=\"{}\"", escape(&class)));
             }
             // 容器也可以是表单：容器 元素=form 动作="/save" 方式=post
             if tag == "form" {
