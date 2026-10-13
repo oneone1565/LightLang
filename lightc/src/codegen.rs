@@ -20,7 +20,7 @@ use crate::typeinfer::{self, Ty as ITy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Ty {
-    Int,
+    Int(typeinfer::IntWidth),
     Float,
     Bool,
     Str,
@@ -36,7 +36,7 @@ enum Ty {
 impl From<ITy> for Ty {
     fn from(t: ITy) -> Self {
         match t {
-            ITy::Int => Ty::Int,
+            ITy::Int(w) => Ty::Int(w),
             ITy::Float => Ty::Float,
             ITy::Bool => Ty::Bool,
             ITy::Str => Ty::Str,
@@ -45,10 +45,12 @@ impl From<ITy> for Ty {
             ITy::List => Ty::List,
             ITy::Dict => Ty::Dict,
             ITy::None => Ty::None,
-            ITy::Unknown => Ty::Int,
+            ITy::Unknown => Ty::Int(I64W),
         }
     }
 }
+
+const I64W: typeinfer::IntWidth = typeinfer::IntWidth::I64;
 
 impl Ty {
     fn is_owned(self) -> bool {
@@ -60,7 +62,7 @@ impl Ty {
 /// 类型标注名称 -> 类型（推断环境用的 Ty）
 pub fn type_by_name(name: &str) -> Option<ITy> {
     Some(match name {
-        "整数" => ITy::Int,
+        "整数" => ITy::Int(typeinfer::IntWidth::I64),
         "浮点" => ITy::Float,
         "字符串" => ITy::Str,
         "布尔" => ITy::Bool,
@@ -346,9 +348,55 @@ impl<'a> CodeGen<'a> {
             let bc = self.fresh();
             self.emit(&format!("  {} = bitcast double {} to i64", bc, val));
             self.emit(&format!("  store i64 {}, ptr {}", bc, slot));
+        } else if let Ty::Int(w) = ty {
+            // 栈槽恒为 i64：窄宽度入槽前先符号扩展
+            let wide = self.widen_to_i64(val, w);
+            self.emit(&format!("  store i64 {}, ptr {}", wide, slot));
         } else {
             self.emit(&format!("  store i64 {}, ptr {}", val, slot));
         }
+    }
+
+    /// 把整数寄存器统一到目标宽度：窄的扩展，宽的截断
+    fn coerce_int(&mut self, val: &str, from: Ty, to: typeinfer::IntWidth) -> String {
+        let Ty::Int(fw) = from else {
+            return val.to_string();
+        };
+        if fw == to {
+            return val.to_string();
+        }
+        if fw.bits() < to.bits() {
+            let r = self.fresh();
+            self.emit(&format!("  {} = sext {} {} to {}", r, fw.llvm(), val, to.llvm()));
+            r
+        } else {
+            self.trunc_to_width(val, to)
+        }
+    }
+
+    /// 把窄宽度寄存器符号扩展到 i64
+    fn widen_to_i64(&mut self, val: &str, w: typeinfer::IntWidth) -> String {
+        if w == typeinfer::IntWidth::I64 {
+            return val.to_string();
+        }
+        let r = self.fresh();
+        self.emit(&format!(
+            "  {} = sext {} {} to i64",
+            r,
+            w.llvm(),
+            val
+        ));
+        r
+    }
+
+    /// 把 i64 截断到目标宽度
+    fn trunc_to_width(&mut self, val: &str, w: typeinfer::IntWidth) -> String {
+        if w == typeinfer::IntWidth::I64 {
+            return val.to_string();
+        }
+        let r = self.fresh();
+        self.emit(&format!("  {} = trunc i64 {} to {}", r, val, w.llvm()));
+        r
     }
 
     /// 从 i64 栈槽加载，按类型还原（浮点会转回 double）
@@ -356,23 +404,30 @@ impl<'a> CodeGen<'a> {
         let r = self.fresh();
         self.emit(&format!("  {} = load i64, ptr {}", r, slot));
         if ty.is_float() {
-            let f = self.fresh();
-            self.emit(&format!("  {} = bitcast i64 {} to double", f, r));
-            f
-        } else {
-            r
+            let d = self.fresh();
+            self.emit(&format!("  {} = bitcast i64 {} to double", d, r));
+            return d;
         }
+        if let Ty::Int(w) = ty {
+            // 槽里是 i64，取回窄宽度要截断
+            return self.trunc_to_width(&r, w);
+        }
+        r
     }
 
     /// 把一个值（int 或 float）提升为 double
     fn to_double(&mut self, val: &str, ty: Ty) -> String {
         if ty.is_float() {
-            val.to_string()
-        } else {
-            let r = self.fresh();
-            self.emit(&format!("  {} = sitofp i64 {} to double", r, val));
-            r
+            return val.to_string();
         }
+        // 窄整数先扩展，sitofp 只吃 i64
+        let src = match ty {
+            Ty::Int(w) => self.widen_to_i64(val, w),
+            _ => val.to_string(),
+        };
+        let r = self.fresh();
+        self.emit(&format!("  {} = sitofp i64 {} to double", r, src));
+        r
     }
 
     fn double_to_i64(&mut self, val: &str) -> String {
@@ -381,9 +436,13 @@ impl<'a> CodeGen<'a> {
         r
     }
 
+    /// 把值转成 i64 的统一出口：窄整数先符号扩展，动态值先解标签
     fn value_as_i64(&mut self, val: &str, ty: &Ty) -> String {
         if *ty == Ty::Unknown {
             return self.untag(val);
+        }
+        if let Ty::Int(w) = ty {
+            return self.widen_to_i64(val, *w);
         }
         if ty.is_float() {
             let r = self.fresh();
@@ -427,7 +486,7 @@ impl<'a> CodeGen<'a> {
     /// 字面量的静态类型；非字面量或类型不定返回 None
     fn literal_type(expr: &Expr) -> Option<Ty> {
         Some(match expr {
-            Expr::Int(_) => Ty::Int,
+            Expr::Int(_) => Ty::Int(I64W),
             Expr::Float(_) => Ty::Float,
             Expr::Bool(_) => Ty::Bool,
             Expr::Str(_) => Ty::Str,
@@ -473,7 +532,7 @@ impl<'a> CodeGen<'a> {
 
     fn value_tag(ty: &Ty) -> i32 {
         match ty {
-            Ty::Int => 0,
+            Ty::Int(..) => 0,
             Ty::Float => 1,
             Ty::Str => 2,
             Ty::Bool => 3,
@@ -729,10 +788,23 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 .flatten()
                 .and_then(|text| type_by_name(&text));
             let pty = self.env.param_types.get(&(f.name.clone(), i)).cloned();
-            let ty: Ty = annotated
-                .map(Ty::from)
-                .or_else(|| pty.map(|t| t.into()))
-                .unwrap_or(Ty::Int);
+            // 形参槽是 ABI 的 i64：无标注形参必须按 i64 读回，
+            // 否则会被 load_value 截断成推断出的窄宽度
+            let ty: Ty = match annotated {
+                Some(t) => Ty::from(t),
+                None => match pty.map(Ty::from) {
+                    Some(Ty::Float) => Ty::Float,
+                    Some(Ty::Str) => Ty::Str,
+                    Some(Ty::Bool) => Ty::Bool,
+                    Some(Ty::None) => Ty::None,
+                    Some(Ty::List) => Ty::List,
+                    Some(Ty::Dict) => Ty::Dict,
+                    Some(Ty::Array) => Ty::Array,
+                    Some(Ty::Tuple) => Ty::Tuple,
+                    // 其余（含推断不出的整数）按 i64 读回：槽位是 ABI 的 i64
+                    _ => Ty::Int(I64W),
+                },
+            };
             scope.vars.insert(name.clone(), (reg, ty));
             // 参数语义：字符串按值传入（本函数负责释放），容器按引用借用（调用方负责）
             if matches!(ty, Ty::Str) {
@@ -1035,7 +1107,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         let arr = self.fresh();
         self.emit(&format!("  {} = call ptr @light_array_new(i64 {})", arr, total));
         for (index, (_, raw, tag, tag_reg)) in entries.iter().enumerate() {
-            let raw = self.value_as_i64(raw, &Ty::Int);
+            let raw = self.value_as_i64(raw, &Ty::Int(I64W));
             let tag_value = match tag_reg {
                 Some(reg) => reg.clone(),
                 None => tag.to_string(),
@@ -1165,7 +1237,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                     self.emit(&format!("  call void @light_str_free(ptr {})", p));
                 }
             }
-            Ty::Int => self.emit(&format!("  call void @light_page_append_int(i64 {})", reg)),
+            Ty::Int(..) => self.emit(&format!("  call void @light_page_append_int(i64 {})", reg)),
             Ty::Float => self.emit(&format!("  call void @light_page_append_float(double {})", reg)),
             Ty::Bool => self.emit(&format!("  call void @light_page_append_bool(i64 {})", reg)),
             _ => return Err("页面中只能打印字符串、数字或布尔值".into()),
@@ -1394,13 +1466,14 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                         let (idx_reg, idx_ty) = self.gen_expr(idx, scopes)?;
                         let (val_reg, vty) = self.gen_expr(value, scopes)?;
                         let val_i64 = self.value_as_i64(&val_reg, &vty);
+                        let idx_i = self.value_as_i64(&idx_reg, &idx_ty);
                         let ap = self.i64_to_ptr(&arr_reg);
                         match arr_ty {
                             Ty::Array | Ty::List => {
                                 self.emit(&format!(
                                     "  call void @light_array_set_copy_tag(ptr {}, i64 {}, i32 {}, i64 {})",
                                     ap,
-                                    idx_reg,
+                                    idx_i,
                                     Self::value_tag(&vty),
                                     val_i64
                                 ));
@@ -1490,8 +1563,10 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                         ));
                         self.emit("  call void @light_print_newline()");
                     }
-                    Ty::Int => {
-                        self.emit(&format!("  call void @light_print_int(i64 {})", reg));
+                    Ty::Int(w) => {
+                        // 打印接口收 i64，窄宽度先扩展
+                        let wide = self.widen_to_i64(&reg, w);
+                        self.emit(&format!("  call void @light_print_int(i64 {})", wide));
                         self.emit("  call void @light_print_newline()");
                     }
                     Ty::Float => {
@@ -1619,7 +1694,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 self.emit(&format!("  {} = alloca i64", vreg));
                 self.emit(&format!("  store i64 {}, ptr {}", elem, vreg));
                 let scope = scopes.last_mut().unwrap();
-                scope.vars.insert(var.clone(), (vreg.clone(), Ty::Int));
+                scope.vars.insert(var.clone(), (vreg.clone(), Ty::Int(I64W)));
                 // break → end, continue → step（先自增再判断）
                 self.loops.push(LoopCtx { brk: end_lbl.clone(), cont: step_lbl.clone() });
                 self.gen_block(body, scopes)?;
@@ -1658,11 +1733,13 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                                 Self::mark_moved(scopes, n);
                             }
                         }
-                        // 浮点返回：bitcast 为 i64
+                        // 返回 ABI 是 i64：浮点 bitcast，窄整数符号扩展
                         if ty.is_float() {
                             let bc = self.fresh();
                             self.emit(&format!("  {} = bitcast double {} to i64", bc, r));
                             bc
+                        } else if let Ty::Int(w) = ty {
+                            self.widen_to_i64(&r, w)
                         } else {
                             r
                         }
@@ -1781,9 +1858,11 @@ fn cleanup_scope(&mut self, scope: &Scope) {
     fn gen_expr(&mut self, expr: &Expr, scopes: &mut Vec<Scope>) -> Result<(String, Ty), String> {
         match expr {
             Expr::Int(n) => {
+                // 按字面量大小选最窄的宽度（小整数常量在寄存器里更省）
+                let w = typeinfer::IntWidth::for_value(*n);
                 let r = self.fresh();
-                self.emit(&format!("  {} = add i64 0, {}", r, n));
-                Ok((r, Ty::Int))
+                self.emit(&format!("  {} = add {} 0, {}", r, w.llvm(), n));
+                Ok((r, Ty::Int(w)))
             }
             Expr::Float(n) => {
                 let r = self.fresh();
@@ -1894,9 +1973,17 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                             self.emit(&format!("  {} = fsub double -0.0, {}", r, or_));
                             Ok((r, Ty::Float))
                         } else {
+                            let w = match oty {
+                                Ty::Int(w) => w,
+                                _ => I64W,
+                            };
+                            let v = self.coerce_int(&or_, oty, w);
                             let r = self.fresh();
-                            self.emit(&format!("  {} = sub i64 0, {}", r, or_));
-                            Ok((r, Ty::Int))
+                            self.emit(&format!(
+                                "  {} = sub {} 0, {}",
+                                r, w.llvm(), v
+                            ));
+                            Ok((r, Ty::Int(w)))
                         }
                     }
                     UnaryOp::Not => {
@@ -1959,18 +2046,19 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 }
                 let (arr_reg, arr_ty) = self.gen_expr(arr, scopes)?;
                 let (idx_reg, idx_ty) = self.gen_expr(idx, scopes)?;
+                let idx_i = self.value_as_i64(&idx_reg, &idx_ty);
                 match arr_ty {
                     Ty::Array | Ty::List => {
                         let ap = self.i64_to_ptr(&arr_reg);
                         let r = self.fresh();
                         self.emit(&format!(
                             "  {} = call i64 @light_array_get(ptr {}, i64 {})",
-                            r, ap, idx_reg
+                            r, ap, idx_i
                         ));
                         let t = self.fresh();
                         self.emit(&format!(
                             "  {} = call i32 @light_array_get_tag(ptr {}, i64 {})",
-                            t, ap, idx_reg
+                            t, ap, idx_i
                         ));
                         if !matches!(arr.as_ref(), Expr::Ident(_)) {
                             self.emit(&format!("  call void @light_array_free(ptr {})", ap));
@@ -2000,7 +2088,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                         if !matches!(arr.as_ref(), Expr::Ident(_)) {
                             self.emit(&format!("  call void @light_str_free(ptr {})", sp));
                         }
-                        Ok((r, Ty::Int))
+                        Ok((r, Ty::Int(I64W)))
                     }
                     Ty::Dict => {
                         // 字典取值统一返回文本形式
@@ -2042,9 +2130,10 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 }
             }
             Expr::ArrayNew(len_expr) => {
-                let (len_reg, _) = self.gen_expr(len_expr, scopes)?;
+                let (len_reg, len_ty) = self.gen_expr(len_expr, scopes)?;
+                let len_i = self.value_as_i64(&len_reg, &len_ty);
                 let ap = self.fresh();
-                self.emit(&format!("  {} = call ptr @light_array_new(i64 {})", ap, len_reg));
+                self.emit(&format!("  {} = call ptr @light_array_new(i64 {})", ap, len_i));
                 let r = self.ptr_to_i64(&ap);
                 Ok((r, Ty::Array))
             }
@@ -2114,20 +2203,32 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         } else {
             // 整数运算
             match op {
-                BinOp::FloorDiv => {
+                // 这三个只运行期有 i64 版本：操作数先扩展到位，结果按原宽度回窄
+                BinOp::FloorDiv | BinOp::Pow | BinOp::Mod => {
+                    let w = match (lt, rt) {
+                        (Ty::Int(a), Ty::Int(b)) => {
+                            if a.bits() >= b.bits() { a } else { b }
+                        }
+                        _ => I64W,
+                    };
+                    let lw = self.coerce_int(&lr, lt, I64W);
+                    let rw2 = self.coerce_int(&rr, rt, I64W);
                     let r = self.fresh();
-                    self.emit(&format!("  {} = call i64 @light_floor_div(i64 {}, i64 {})", r, lr, rr));
-                    Ok((r, Ty::Int))
-                }
-                BinOp::Pow => {
-                    let r = self.fresh();
-                    self.emit(&format!("  {} = call i64 @light_pow_int(i64 {}, i64 {})", r, lr, rr));
-                    Ok((r, Ty::Int))
-                }
-                BinOp::Mod => {
-                    let r = self.fresh();
-                    self.emit(&format!("  {} = srem i64 {}, {}", r, lr, rr));
-                    Ok((r, Ty::Int))
+                    match op {
+                        BinOp::Mod => {
+                            self.emit(&format!("  {} = srem i64 {}, {}", r, lw, rw2));
+                        }
+                        BinOp::FloorDiv => self.emit(&format!(
+                            "  {} = call i64 @light_floor_div(i64 {}, i64 {})",
+                            r, lw, rw2
+                        )),
+                        _ => self.emit(&format!(
+                            "  {} = call i64 @light_pow_int(i64 {}, i64 {})",
+                            r, lw, rw2
+                        )),
+                    }
+                    let narrowed = self.trunc_to_width(&r, w);
+                    Ok((narrowed, Ty::Int(w)))
                 }
                 BinOp::Div => {
                     // 整数除法（当两边都是 int 时，Div 走这里；但类型推断说 Div 返回 Float）
@@ -2135,7 +2236,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                     // 实际上类型推断 Div=>Float，所以这里不会被命中（force_float 已处理）。
                     let r = self.fresh();
                     self.emit(&format!("  {} = sdiv i64 {}, {}", r, lr, rr));
-                    Ok((r, Ty::Int))
+                    Ok((r, Ty::Int(I64W)))
                 }
                 _ => {
                     let r = self.fresh();
@@ -2145,8 +2246,20 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                         BinOp::Mul => "mul",
                         _ => unreachable!(),
                     };
-                    self.emit(&format!("  {} = {} i64 {}, {}", r, inst, lr, rr));
-                    Ok((r, Ty::Int))
+                    // 结果宽度取两侧较宽者；操作数可能比结果窄，先补扩展
+                    let w = match (lt, rt) {
+                        (Ty::Int(a), Ty::Int(b)) => {
+                            if a.bits() >= b.bits() { a } else { b }
+                        }
+                        _ => I64W,
+                    };
+                    let lw = self.coerce_int(&lr, lt, w);
+                    let rw2 = self.coerce_int(&rr, rt, w);
+                    self.emit(&format!(
+                        "  {} = {} {} {}, {}",
+                        r, inst, w.llvm(), lw, rw2
+                    ));
+                    Ok((r, Ty::Int(w)))
                 }
             }
         }
@@ -2261,7 +2374,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             "  {} = phi i64 [ %{}, %{} ], [ %{}, %{} ]",
             res, out, str_label, out2, int_label
         ));
-        let ty = if cmp_pred.is_some() { Ty::Bool } else { Ty::Int };
+        let ty = if cmp_pred.is_some() { Ty::Bool } else { Ty::Int(I64W) };
         Ok((res, ty))
     }
 
@@ -2334,7 +2447,19 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 BinOp::Ge => "sge",
                 _ => unreachable!(),
             };
-            self.emit(&format!("  {} = icmp {} i64 {}, {}", r, pred, lr, rr));
+            // 比较按较宽一侧的宽度做，两侧先统一
+            let w = match (lt, rt) {
+                (Ty::Int(a), Ty::Int(b)) => {
+                    if a.bits() >= b.bits() { a } else { b }
+                }
+                _ => I64W,
+            };
+            let lw = self.coerce_int(&lr, lt, w);
+            let rw2 = self.coerce_int(&rr, rt, w);
+            self.emit(&format!(
+                "  {} = icmp {} {} {}, {}",
+                r, pred, w.llvm(), lw, rw2
+            ));
         }
         let r2 = self.fresh();
         self.emit(&format!("  {} = zext i1 {} to i64", r2, r));
@@ -2390,7 +2515,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         ));
         self.free_value(&method_reg, &Ty::Str);
         self.free_value(&path_reg, &Ty::Str);
-        Ok((status, Ty::Int))
+        Ok((status, Ty::Int(I64W)))
     }
 
     fn gen_web_run(&mut self, args: &[Expr], scopes: &mut Vec<Scope>) -> Result<(String, Ty), String> {
@@ -2398,12 +2523,12 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             return Err("启动 需要一个端口参数".into());
         }
         let (port, ty) = self.gen_expr(&args[0], scopes)?;
-        if ty != Ty::Int {
+        if !matches!(ty, Ty::Int(..)) {
             return Err("启动端口必须是整数".into());
         }
         let result = self.fresh();
         self.emit(&format!("  {} = call i64 @light_web_run_v1(i64 {})", result, port));
-        Ok((result, Ty::Int))
+        Ok((result, Ty::Int(I64W)))
     }
 
     /// 页面元素类型码：与 lightweb/src/elements.rs 的 KIND_* 一一对应
@@ -2552,7 +2677,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             Ty::Bool => {
                 self.emit(&format!("  call void @light_page_append_bool(i64 {})", reg));
             }
-            Ty::Int => {
+            Ty::Int(..) => {
                 self.emit(&format!("  call void @light_page_append_int(i64 {})", reg));
             }
             _ => {
@@ -2626,7 +2751,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         if args.is_empty() {
             return Err(format!("{} 需要请求参数", name));
         }
-        let (request, _) = self.gen_expr(&args[0], scopes)?;
+        let (request, request_ty) = self.gen_expr(&args[0], scopes)?;
         if name == "请求头" || name == "请求参数" {
             if args.len() != 2 {
                 return Err(format!("{} 需要请求和名称", name));
@@ -2693,7 +2818,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 }
                 let result = self.fresh();
                 self.emit(&format!("  {} = call i64 @light_thread_join_all()", result));
-                return Ok((result, Ty::Int));
+                return Ok((result, Ty::Int(I64W)));
             }
             _ => {}
         }
@@ -2704,9 +2829,10 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             match name {
             "范围" => {
                 if args.len() != 1 { return Err("范围 需要 1 个参数".into()); }
-                let (n, _) = self.gen_expr(&args[0], scopes)?;
+                let (n, n_ty) = self.gen_expr(&args[0], scopes)?;
+                let n_i = self.value_as_i64(&n, &n_ty);
                 let ap = self.fresh();
-                self.emit(&format!("  {} = call ptr @light_range(i64 {})", ap, n));
+                self.emit(&format!("  {} = call ptr @light_range(i64 {})", ap, n_i));
                 let r = self.ptr_to_i64(&ap);
                 return Ok((r, Ty::Array));
             }
@@ -2731,7 +2857,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                         _ => {}
                     }
                 }
-                return Ok((r, Ty::Int));
+                return Ok((r, Ty::Int(I64W)));
             }
             "绝对值" => {
                 if args.len() != 1 { return Err("绝对值 需要 1 个参数".into()); }
@@ -2741,13 +2867,17 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                     self.emit(&format!("  {} = call double @llvm.fabs.f64(double {})", r, v));
                     return Ok((r, Ty::Float));
                 } else {
-                    // int abs: 若 < 0 取负
+                    // 整数绝对值：若 < 0 取负。操作数先扩展到 i64
+                    let iv = self.value_as_i64(&v, &ty);
                     let neg = self.fresh();
-                    self.emit(&format!("  {} = sub i64 0, {}", neg, v));
+                    self.emit(&format!("  {} = sub i64 0, {}", neg, iv));
                     let is_neg = self.fresh();
-                    self.emit(&format!("  {} = icmp slt i64 {}, 0", is_neg, v));
-                    self.emit(&format!("  {} = select i1 {}, i64 {}, i64 {}", r, is_neg, neg, v));
-                    return Ok((r, Ty::Int));
+                    self.emit(&format!("  {} = icmp slt i64 {}, 0", is_neg, iv));
+                    self.emit(&format!(
+                        "  {} = select i1 {}, i64 {}, i64 {}",
+                        r, is_neg, neg, iv
+                    ));
+                    return Ok((r, Ty::Int(I64W)));
                 }
             }
             "最小" => {
@@ -2764,7 +2894,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 let c = self.fresh();
                 self.emit(&format!("  {} = icmp slt i64 {}, {}", c, a, b));
                 self.emit(&format!("  {} = select i1 {}, i64 {}, i64 {}", r, c, a, b));
-                return Ok((r, Ty::Int));
+                return Ok((r, Ty::Int(I64W)));
             }
             "最大" => {
                 if args.len() != 2 { return Err("最大 需要 2 个参数".into()); }
@@ -2780,7 +2910,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 let c = self.fresh();
                 self.emit(&format!("  {} = icmp sgt i64 {}, {}", c, a, b));
                 self.emit(&format!("  {} = select i1 {}, i64 {}, i64 {}", r, c, a, b));
-                return Ok((r, Ty::Int));
+                return Ok((r, Ty::Int(I64W)));
             }
             "求和" => {
                 if args.len() != 1 { return Err("求和 需要 1 个数组参数".into()); }
@@ -2823,7 +2953,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 if Self::is_temp(&args[0]) {
                     self.emit(&format!("  call void @light_array_free(ptr {})", ap));
                 }
-                return Ok((r, Ty::Int));
+                return Ok((r, Ty::Int(I64W)));
             }
             "整数" => {
                 if args.len() != 1 { return Err("整数 需要 1 个参数".into()); }
@@ -2831,7 +2961,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 return match ty {
                     Ty::Float => {
                         let r = self.double_to_i64(&v);
-                        Ok((r, Ty::Int))
+                        Ok((r, Ty::Int(I64W)))
                     }
                     Ty::Str => {
                         let p = self.i64_to_ptr(&v);
@@ -2840,9 +2970,9 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                         if Self::is_temp(&args[0]) {
                             self.emit(&format!("  call void @light_str_free(ptr {})", p));
                         }
-                        Ok((r, Ty::Int))
+                        Ok((r, Ty::Int(I64W)))
                     }
-                    _ => Ok((v, Ty::Int)),
+                    _ => Ok((v, Ty::Int(I64W))),
                 };
             }
             "浮点" => {
@@ -2850,7 +2980,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 let (v, ty) = self.gen_expr(&args[0], scopes)?;
                 return match ty {
                     Ty::Float => Ok((v, Ty::Float)),
-                    Ty::Int | Ty::Bool => {
+                    Ty::Int(..) | Ty::Bool => {
                         let r = self.to_double(&v, ty);
                         Ok((r, Ty::Float))
                     }
@@ -2871,7 +3001,11 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 let (v, ty) = self.gen_expr(&args[0], scopes)?;
                 let sp = self.fresh();
                 match ty {
-                    Ty::Int => self.emit(&format!("  {} = call ptr @light_int_to_str(i64 {})", sp, v)),
+                    // 这些运行期接口都收 i64，窄整数先扩展
+                    Ty::Int(w) => {
+                        let wide = self.widen_to_i64(&v, w);
+                        self.emit(&format!("  {} = call ptr @light_int_to_str(i64 {})", sp, wide));
+                    }
                     Ty::Bool => self.emit(&format!("  {} = call ptr @light_bool_to_str(i64 {})", sp, v)),
                     Ty::Float => self.emit(&format!("  {} = call ptr @light_float_to_str(double {})", sp, v)),
                     Ty::Str => {
@@ -2985,7 +3119,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                             }
                             return Ok((self.ptr_to_i64(&r), Ty::Str));
                         }
-                        return Ok((r, Ty::Int));
+                        return Ok((r, Ty::Int(I64W)));
                     }
                     _ => {
                         return Err(format!("{} 只能作用于数组或字典", name));
@@ -3005,7 +3139,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 if Self::is_temp(&args[0]) {
                     self.emit(&format!("  call void @light_array_free(ptr {})", ap));
                 }
-                return Ok((r, Ty::Int));
+                return Ok((r, Ty::Int(I64W)));
             }
             // ---- 数学模块 ----
             "正弦" => {
@@ -3102,17 +3236,17 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             }
             "随机整数" => {
                 if args.len() != 2 { return Err("随机整数 需要 2 个参数".into()); }
-                let (a, _) = self.gen_expr(&args[0], scopes)?;
-                let (b, _) = self.gen_expr(&args[1], scopes)?;
+                let (a, a_ty) = self.gen_expr(&args[0], scopes)?;
+                let (b, b_ty) = self.gen_expr(&args[1], scopes)?;
                 let r = self.fresh();
                 self.emit(&format!("  {} = call i64 @light_math_random_int(i64 {}, i64 {})", r, a, b));
-                return Ok((r, Ty::Int));
+                return Ok((r, Ty::Int(I64W)));
             }
             // ---- 字符串模块 ----
             "查找" => {
                 if args.len() != 2 { return Err("查找 需要 2 个参数".into()); }
                 let (s, sty) = self.gen_expr(&args[0], scopes)?;
-                let (sub, _) = self.gen_expr(&args[1], scopes)?;
+                let (sub, sub_ty) = self.gen_expr(&args[1], scopes)?;
                 if sty != Ty::Str { return Err("查找 第一个参数必须是字符串".into()); }
                 let sp = self.i64_to_ptr(&s);
                 let subp = self.i64_to_ptr(&sub);
@@ -3121,7 +3255,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 if Self::is_temp(&args[1]) {
                     self.emit(&format!("  call void @light_str_free(ptr {})", subp));
                 }
-                return Ok((r, Ty::Int));
+                return Ok((r, Ty::Int(I64W)));
             }
             "存在" => {
                 if args.len() != 2 {
@@ -3156,7 +3290,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 if args.len() != 2 { return Err("包含 需要 2 个参数".into()); }
                 let (s, sty) = self.gen_expr(&args[0], scopes)?;
                 if sty == Ty::Str {
-                    let (sub, _) = self.gen_expr(&args[1], scopes)?;
+                    let (sub, sub_ty) = self.gen_expr(&args[1], scopes)?;
                     let sp = self.i64_to_ptr(&s);
                     let subp = self.i64_to_ptr(&sub);
                     let r = self.fresh();
@@ -3220,8 +3354,8 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             "替换" => {
                 if args.len() != 3 { return Err("替换 需要 3 个参数".into()); }
                 let (s, sty) = self.gen_expr(&args[0], scopes)?;
-                let (old, _) = self.gen_expr(&args[1], scopes)?;
-                let (new, _) = self.gen_expr(&args[2], scopes)?;
+                let (old, old_ty) = self.gen_expr(&args[1], scopes)?;
+                let (new, new_ty) = self.gen_expr(&args[2], scopes)?;
                 if sty != Ty::Str { return Err("替换 第一个参数必须是字符串".into()); }
                 let sp = self.i64_to_ptr(&s);
                 let oldp = self.i64_to_ptr(&old);
@@ -3243,7 +3377,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             "分割" => {
                 if args.len() != 2 { return Err("分割 需要 2 个参数".into()); }
                 let (s, sty) = self.gen_expr(&args[0], scopes)?;
-                let (sep, _) = self.gen_expr(&args[1], scopes)?;
+                let (sep, sep_ty) = self.gen_expr(&args[1], scopes)?;
                 if sty != Ty::Str { return Err("分割 第一个参数必须是字符串".into()); }
                 let sp = self.i64_to_ptr(&s);
                 let sepp = self.i64_to_ptr(&sep);
@@ -3261,7 +3395,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             "合并" => {
                 if args.len() != 2 { return Err("合并 需要 2 个参数（数组, 分隔符）".into()); }
                 let (mut arr, aty) = self.gen_expr(&args[0], scopes)?;
-                let (sep, _) = self.gen_expr(&args[1], scopes)?;
+                let (sep, sep_ty) = self.gen_expr(&args[1], scopes)?;
                 // 运行期才知道类型的值可能带标签，先解标签
                 if aty == Ty::Unknown { arr = self.untag(&arr); }
                 if !matches!(aty, Ty::Array | Ty::List | Ty::Unknown) { return Err("合并 第一个参数必须是数组".into()); }
@@ -3320,13 +3454,15 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             "切片" => {
                 if args.len() != 3 { return Err("切片 需要 3 个参数（字符串/数组, 起始, 结束）".into()); }
                 let (s, sty) = self.gen_expr(&args[0], scopes)?;
-                let (start, _) = self.gen_expr(&args[1], scopes)?;
-                let (end, _) = self.gen_expr(&args[2], scopes)?;
+                let (start, start_ty) = self.gen_expr(&args[1], scopes)?;
+                let (end, end_ty) = self.gen_expr(&args[2], scopes)?;
                 match sty {
                     Ty::Str => {
                         let sp = self.i64_to_ptr(&s);
+                        let start_i = self.value_as_i64(&start, &start_ty);
+                        let end_i = self.value_as_i64(&end, &end_ty);
                         let r = self.fresh();
-                        self.emit(&format!("  {} = call ptr @light_str_substr(ptr {}, i64 {}, i64 {})", r, sp, start, end));
+                        self.emit(&format!("  {} = call ptr @light_str_substr(ptr {}, i64 {}, i64 {})", r, sp, start_i, end_i));
                         if Self::is_temp(&args[0]) {
                             self.emit(&format!("  call void @light_str_free(ptr {})", sp));
                         }
@@ -3359,7 +3495,7 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 if Self::is_temp(&args[0]) {
                     self.emit(&format!("  call void @light_array_free(ptr {})", ap));
                 }
-                return Ok((r, Ty::Int));
+                return Ok((r, Ty::Int(I64W)));
             }
             "反转" => {
                 if args.len() != 1 { return Err("反转 需要 1 个数组参数".into()); }
@@ -3496,68 +3632,68 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             // ---- 机器层：裸内存原语（用 Light 写运行时的地基）----
             "内存分配" => {
                 if args.len() != 1 { return Err("内存分配 需要 1 个参数（字节数）".into()); }
-                let (n, _) = self.gen_expr(&args[0], scopes)?;
+                let (n, n_ty) = self.gen_expr(&args[0], scopes)?;
                 let r = self.fresh();
                 self.emit(&format!("  {} = call i64 @light_mem_alloc(i64 {})", r, n));
-                return Ok((r, Ty::Int));
+                return Ok((r, Ty::Int(I64W)));
             }
             "内存释放" => {
                 if args.len() != 1 { return Err("内存释放 需要 1 个地址".into()); }
-                let (p, _) = self.gen_expr(&args[0], scopes)?;
+                let (p, p_ty) = self.gen_expr(&args[0], scopes)?;
                 self.emit(&format!("  call void @light_mem_free(i64 {})", p));
                 let r = self.fresh();
                 self.emit(&format!("  {} = add i64 0, 0", r));
-                return Ok((r, Ty::Int));
+                return Ok((r, Ty::Int(I64W)));
             }
             "内存复制" => {
                 if args.len() != 3 { return Err("内存复制 需要 3 个参数（目标, 源, 字节数）".into()); }
-                let (d, _) = self.gen_expr(&args[0], scopes)?;
+                let (d, d_ty) = self.gen_expr(&args[0], scopes)?;
                 let (s2, _) = self.gen_expr(&args[1], scopes)?;
-                let (n, _) = self.gen_expr(&args[2], scopes)?;
+                let (n, n_ty) = self.gen_expr(&args[2], scopes)?;
                 let r = self.fresh();
                 self.emit(&format!("  {} = call i64 @light_mem_copy(i64 {}, i64 {}, i64 {})", r, d, s2, n));
-                return Ok((r, Ty::Int));
+                return Ok((r, Ty::Int(I64W)));
             }
             "内存置零" => {
                 if args.len() != 2 { return Err("内存置零 需要 2 个参数（地址, 字节数）".into()); }
-                let (p, _) = self.gen_expr(&args[0], scopes)?;
-                let (n, _) = self.gen_expr(&args[1], scopes)?;
+                let (p, p_ty) = self.gen_expr(&args[0], scopes)?;
+                let (n, n_ty) = self.gen_expr(&args[1], scopes)?;
                 self.emit(&format!("  call void @light_mem_zero(i64 {}, i64 {})", p, n));
                 let r = self.fresh();
                 self.emit(&format!("  {} = add i64 0, 0", r));
-                return Ok((r, Ty::Int));
+                return Ok((r, Ty::Int(I64W)));
             }
             "内存整数" => {
                 if args.len() != 1 { return Err("内存整数 需要 1 个地址".into()); }
-                let (p, _) = self.gen_expr(&args[0], scopes)?;
+                let (p, p_ty) = self.gen_expr(&args[0], scopes)?;
                 let r = self.fresh();
                 self.emit(&format!("  {} = call i64 @light_mem_load(i64 {})", r, p));
-                return Ok((r, Ty::Int));
+                return Ok((r, Ty::Int(I64W)));
             }
             "存内存整数" => {
                 if args.len() != 2 { return Err("存内存整数 需要 2 个参数（地址, 值）".into()); }
-                let (p, _) = self.gen_expr(&args[0], scopes)?;
-                let (v, _) = self.gen_expr(&args[1], scopes)?;
+                let (p, p_ty) = self.gen_expr(&args[0], scopes)?;
+                let (v, v_ty) = self.gen_expr(&args[1], scopes)?;
                 self.emit(&format!("  call void @light_mem_store(i64 {}, i64 {})", p, v));
                 let r = self.fresh();
                 self.emit(&format!("  {} = add i64 0, 0", r));
-                return Ok((r, Ty::Int));
+                return Ok((r, Ty::Int(I64W)));
             }
             "内存字节" => {
                 if args.len() != 1 { return Err("内存字节 需要 1 个地址".into()); }
-                let (p, _) = self.gen_expr(&args[0], scopes)?;
+                let (p, p_ty) = self.gen_expr(&args[0], scopes)?;
                 let r = self.fresh();
                 self.emit(&format!("  {} = call i64 @light_mem_load8(i64 {})", r, p));
-                return Ok((r, Ty::Int));
+                return Ok((r, Ty::Int(I64W)));
             }
             "存内存字节" => {
                 if args.len() != 2 { return Err("存内存字节 需要 2 个参数（地址, 值）".into()); }
-                let (p, _) = self.gen_expr(&args[0], scopes)?;
-                let (v, _) = self.gen_expr(&args[1], scopes)?;
+                let (p, p_ty) = self.gen_expr(&args[0], scopes)?;
+                let (v, v_ty) = self.gen_expr(&args[1], scopes)?;
                 self.emit(&format!("  call void @light_mem_store8(i64 {}, i64 {})", p, v));
                 let r = self.fresh();
                 self.emit(&format!("  {} = add i64 0, 0", r));
-                return Ok((r, Ty::Int));
+                return Ok((r, Ty::Int(I64W)));
             }
             "命令行参数" => {
                 if !args.is_empty() { return Err("命令行参数 不需要参数".into()); }
@@ -3579,19 +3715,21 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 self.emit(&format!("  call void @light_eprint_str(ptr {}, i64 {})", data, len));
                 let r = self.fresh();
                 self.emit(&format!("  {} = add i64 0, 0", r));
-                return Ok((r, Ty::Int));
+                return Ok((r, Ty::Int(I64W)));
             }
             "退出" => {
                 if args.len() != 1 { return Err("退出 需要 1 个退出码参数".into()); }
-                let (code, _) = self.gen_expr(&args[0], scopes)?;
-                self.emit(&format!("  call void @light_sys_exit(i64 {})", code));
+                let (code, code_ty) = self.gen_expr(&args[0], scopes)?;
+                let code_i = self.value_as_i64(&code, &code_ty);
+                self.emit(&format!("  call void @light_sys_exit(i64 {})", code_i));
                 return Ok(("0".to_string(), Ty::None));
             }
             "字符" => {
                 if args.len() != 1 { return Err("字符 需要 1 个参数（字节值）".into()); }
-                let (v, _) = self.gen_expr(&args[0], scopes)?;
+                let (v, v_ty) = self.gen_expr(&args[0], scopes)?;
+                let v_i = self.value_as_i64(&v, &v_ty);
                 let r = self.fresh();
-                self.emit(&format!("  {} = call ptr @light_byte_to_char(i64 {})", r, v));
+                self.emit(&format!("  {} = call ptr @light_byte_to_char(i64 {})", r, v_i));
                 let rr = self.ptr_to_i64(&r);
                 return Ok((rr, Ty::Str));
             }
@@ -3642,11 +3780,17 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             } else {
                 r
             };
-            // 浮点参数 bitcast 为 i64；打标签时 tag_value 已经转过一次，别再来一遍
+            // 调用 ABI 收 i64：浮点 bitcast，窄整数符号扩展
             let v = if t.is_float() && !wants_tag {
                 let bc = self.fresh();
                 self.emit(&format!("  {} = bitcast double {} to i64", bc, r));
                 bc
+            } else if let Ty::Int(w) = t {
+                if wants_tag {
+                    r
+                } else {
+                    self.widen_to_i64(&r, w)
+                }
             } else {
                 r
             };
@@ -3669,13 +3813,17 @@ fn cleanup_scope(&mut self, scope: &Scope) {
                 .get(name)
                 .cloned()
                 .map(|t| t.into())
-                .unwrap_or(Ty::Int)
+                .unwrap_or(Ty::Int(I64W))
         };
         // 浮点返回：bitcast 回 double
         if ret_ty.is_float() {
             let f = self.fresh();
             self.emit(&format!("  {} = bitcast i64 {} to double", f, r));
             Ok((f, Ty::Float))
+        } else if let Ty::Int(w) = ret_ty {
+            // 函数 ABI 统一 i64：窄宽度返回要先扩展
+            let wide = self.widen_to_i64(&r, w);
+            Ok((wide, ret_ty))
         } else {
             Ok((r, ret_ty))
         }

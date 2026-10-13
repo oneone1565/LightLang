@@ -13,9 +13,54 @@ use std::collections::HashMap;
 
 use crate::ast::*;
 
+/// 整数宽度。ABI 与栈槽统一保持 i64，窄宽度只活在寄存器里，
+/// 跨越 store/load/调用边界时补 sext/trunc。这样所有已分发的二进制与
+/// 原生模块都不受影响。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntWidth {
+    I32,
+    I64,
+    I128,
+}
+
+impl IntWidth {
+    pub fn llvm(self) -> &'static str {
+        match self {
+            IntWidth::I32 => "i32",
+            IntWidth::I64 => "i64",
+            IntWidth::I128 => "i128",
+        }
+    }
+
+    pub fn bits(self) -> u32 {
+        match self {
+            IntWidth::I32 => 32,
+            IntWidth::I64 => 64,
+            IntWidth::I128 => 128,
+        }
+    }
+
+    /// 装得下就该用多窄的宽度。i8/i16 太小，日常数字立刻就升级，没有收益
+    pub fn for_value(v: i64) -> IntWidth {
+        if v >= i32::MIN as i64 && v <= i32::MAX as i64 {
+            IntWidth::I32
+        } else {
+            IntWidth::I64
+        }
+    }
+
+    /// 收窄到本宽度：把更宽的值截回
+    pub fn narrow(self, v: i64) -> i64 {
+        match self {
+            IntWidth::I32 => v as i32 as i64,
+            _ => v,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ty {
-    Int,
+    Int(IntWidth),
     Float,
     Bool,
     Str,
@@ -62,7 +107,7 @@ pub fn infer(program: &Program) -> TypeEnv {
             for (i, _) in f.params.iter().enumerate() {
                 env.param_types.insert((f.name.clone(), i), Ty::Unknown);
             }
-            env.return_types.insert(f.name.clone(), Ty::Int);
+            env.return_types.insert(f.name.clone(), Ty::Int(IntWidth::I64));
         }
     }
 
@@ -124,12 +169,12 @@ pub fn infer(program: &Program) -> TypeEnv {
     // 收尾：Unknown 兜底为 Int
     for v in env.param_types.values_mut() {
         if *v == Ty::Unknown {
-            *v = Ty::Int;
+            *v = Ty::Int(IntWidth::I64);
         }
     }
     for v in env.return_types.values_mut() {
         if *v == Ty::Unknown {
-            *v = Ty::Int;
+            *v = Ty::Int(IntWidth::I64);
         }
     }
 
@@ -147,7 +192,7 @@ fn apply_param(env: &mut TypeEnv, fname: &str, idx: usize, ty: Ty) -> bool {
         return true;
     }
     // 已有类型：允许升级（Int 被更强类型覆盖）
-    if matches!(cur, Ty::Int) && !matches!(ty, Ty::Int) {
+    if matches!(cur, Ty::Int(_)) && !matches!(ty, Ty::Int(_)) {
         env.param_types.insert(key, ty);
         return true;
     }
@@ -158,12 +203,12 @@ fn apply_ret(env: &mut TypeEnv, name: &str, ty: Ty) -> bool {
     if matches!(ty, Ty::Unknown) {
         return false;
     }
-    let cur = env.return_types.get(name).cloned().unwrap_or(Ty::Int);
+    let cur = env.return_types.get(name).cloned().unwrap_or(Ty::Int(IntWidth::I64));
     if cur == ty {
         return false;
     }
     // 返回类型可从 Int 升级为具体类型
-    if matches!(cur, Ty::Int) && !matches!(ty, Ty::Int) {
+    if matches!(cur, Ty::Int(_)) && !matches!(ty, Ty::Int(_)) {
         env.return_types.insert(name.to_string(), ty);
         return true;
     }
@@ -451,9 +496,21 @@ pub fn list_elem_type(
     elem.unwrap_or(Ty::Unknown)
 }
 
+/// 两个整数的运算结果宽度：取较宽的一侧
+fn join_int(a: &Ty, b: &Ty) -> Ty {
+    let (Ty::Int(wa), Ty::Int(wb)) = (a, b) else {
+        return Ty::Int(IntWidth::I64);
+    };
+    if wa.bits() >= wb.bits() {
+        Ty::Int(*wa)
+    } else {
+        Ty::Int(*wb)
+    }
+}
+
 pub fn expr_type(expr: &Expr, locals: &HashMap<String, Ty>, env: &TypeEnv, fname: &str) -> Ty {
     match expr {
-        Expr::Int(_) => Ty::Int,
+        Expr::Int(n) => Ty::Int(IntWidth::for_value(*n)),
         Expr::Float(_) => Ty::Float,
         Expr::Bool(_) => Ty::Bool,
         Expr::None => Ty::None,
@@ -462,7 +519,7 @@ pub fn expr_type(expr: &Expr, locals: &HashMap<String, Ty>, env: &TypeEnv, fname
             if let Some(t) = resolve_ident(name, locals, env, fname) {
                 return t;
             }
-            Ty::Int
+            Ty::Int(IntWidth::I64)
         }
         Expr::Tuple(items) => {
             let mut tys = Vec::new();
@@ -488,14 +545,15 @@ pub fn expr_type(expr: &Expr, locals: &HashMap<String, Ty>, env: &TypeEnv, fname
                 Add | Sub | Mul => {
                     if lt == Ty::Str || rt == Ty::Str { Ty::Str }
                     else if lt == Ty::Float || rt == Ty::Float { Ty::Float }
-                    else { Ty::Int }
+                    else { join_int(&lt, &rt) }
                 }
                 Div => {
                     if lt == Ty::Str || rt == Ty::Str { Ty::Str }
                     else { Ty::Float }
                 }
                 FloorDiv | Mod | Pow => {
-                    if lt == Ty::Float || rt == Ty::Float { Ty::Float } else { Ty::Int }
+                    if lt == Ty::Float || rt == Ty::Float { Ty::Float }
+                    else { join_int(&lt, &rt) }
                 }
                 Eq | Neq | Lt | Gt | Le | Ge | And | Or => Ty::Bool,
             }
@@ -504,7 +562,7 @@ pub fn expr_type(expr: &Expr, locals: &HashMap<String, Ty>, env: &TypeEnv, fname
             match op {
                 UnaryOp::Neg => {
                     let t = expr_type(operand, locals, env, fname);
-                    if t == Ty::Float { Ty::Float } else { Ty::Int }
+                    if t == Ty::Float { Ty::Float } else { t }
                 }
                 UnaryOp::Not => Ty::Bool,
             }
@@ -514,15 +572,15 @@ pub fn expr_type(expr: &Expr, locals: &HashMap<String, Ty>, env: &TypeEnv, fname
             match name {
                 "数组" => return Ty::Array,
                 "范围" => return Ty::Array,
-                "长度" => return Ty::Int,
+                "长度" => return Ty::Int(IntWidth::I64),
                 "绝对值" => {
                     if let Some(a) = args.first() {
                         return expr_type(a, locals, env, fname);
                     }
-                    return Ty::Int;
+                    return Ty::Int(IntWidth::I64);
                 }
-                "最小" | "最大" | "求和" => return Ty::Int,
-                "整数" => return Ty::Int,
+                "最小" | "最大" | "求和" => return Ty::Int(IntWidth::I64),
+                "整数" => return Ty::Int(IntWidth::I64),
                 "浮点" => return Ty::Float,
                 "字符串" => return Ty::Str,
                 "输入" => return Ty::Str,
@@ -530,32 +588,32 @@ pub fn expr_type(expr: &Expr, locals: &HashMap<String, Ty>, env: &TypeEnv, fname
                 "正弦" | "余弦" | "正切" | "平方根" | "对数" | "对数10"
                 | "幂" | "圆周率" | "自然常数" | "向上取整" | "向下取整"
                 | "随机" => return Ty::Float,
-                "随机整数" => return Ty::Int,
-                "查找" => return Ty::Int,
+                "随机整数" => return Ty::Int(IntWidth::I64),
+                "查找" => return Ty::Int(IntWidth::I64),
                 "包含" | "文件存在" => return Ty::Bool,
                 "替换" | "大写" | "小写" | "去空白" | "切片" => return Ty::Str,
                 "分割" => return Ty::Array,
                 "合并" | "读取文件" | "执行" | "环境变量" => return Ty::Str,
                 "写入文件" | "追加文件" => return Ty::Bool,
                 "反转" | "连接" => return Ty::Array,
-                "索引" => return Ty::Int,
+                "索引" => return Ty::Int(IntWidth::I64),
                 "排序" => return Ty::None,
                 "退出" => return Ty::None,
                 "字符" => return Ty::Str,
-                "路由" | "启动" => return Ty::Int,
+                "路由" | "启动" => return Ty::Int(IntWidth::I64),
                 "请求方法" | "请求路径" | "请求体" | "请求头" => return Ty::Str,
                 _ => {}
             }
             if let Some(t) = env.return_types.get(name) {
                 return t.clone();
             }
-            Ty::Int
+            Ty::Int(IntWidth::I64)
         }
         Expr::Index { arr, idx: _ } => {
             let at = expr_type(arr, locals, env, fname);
             let _ = at;
             // 数组索引 → 元素为 i64；字符串索引 → 字节 int
-            Ty::Int
+            Ty::Int(IntWidth::I64)
         }
         Expr::ArrayNew(_) => Ty::Array,
     }
