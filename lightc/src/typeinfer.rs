@@ -122,15 +122,26 @@ pub fn infer(program: &Program) -> TypeEnv {
                 collect_locals_stmt(stmt, &mut top_locals, &env, "<top>");
             }
         }
-        // 顶层列表变量的元素类型：同构时才有意义，供下标走静态取值
+        // 列表变量的元素类型：同构时才有意义，供下标走静态取值。
+        // 顶层与函数体内的「让」都要登记——只登记顶层的话，写在函数里的
+        // 同构列表会退化成运行期标签路径，白白让下标多走一趟拆标签。
         for item in &program.items {
-            if let Item::Stmt(Stmt::Let { name, value }) = item {
-                if let Expr::List(items) = value {
-                    let elem = list_elem_type(items, &top_locals, &env, "<top>");
-                    if elem != Ty::Unknown {
-                        top_list_elems.insert(name.clone(), elem);
+            match item {
+                Item::Stmt(Stmt::Let { name, value }) => {
+                    if let Expr::List(items) = value {
+                        let elem = list_elem_type(items, &top_locals, &env, "<top>");
+                        if elem != Ty::Unknown {
+                            top_list_elems.insert(name.clone(), elem);
+                        }
                     }
                 }
+                Item::Fn(f) => {
+                    let mut fn_locals = HashMap::new();
+                    collect_locals(&f.body, &mut fn_locals, &env, &f.name);
+                    collect_let_lists(&f.body.stmts, &fn_locals, &env, &f.name,
+                                       &mut top_list_elems);
+                }
+                _ => {}
             }
         }
         for item in &program.items {
@@ -233,6 +244,50 @@ fn analyze_fn(f: &FnDef, env: &TypeEnv, cons: &mut Constraints) {
 fn collect_locals(block: &Block, locals: &mut HashMap<String, Ty>, env: &TypeEnv, fname: &str) {
     for stmt in &block.stmts {
         collect_locals_stmt(stmt, locals, env, fname);
+    }
+}
+
+fn collect_let_lists(
+    stmts: &[Stmt],
+    locals: &HashMap<String, Ty>,
+    env: &TypeEnv,
+    fname: &str,
+    out: &mut HashMap<String, Ty>,
+) {
+    for stmt in stmts {
+        collect_let_lists_stmt(stmt, locals, env, fname, out);
+    }
+}
+
+fn collect_let_lists_stmt(
+    stmt: &Stmt,
+    locals: &HashMap<String, Ty>,
+    env: &TypeEnv,
+    fname: &str,
+    out: &mut HashMap<String, Ty>,
+) {
+    match stmt {
+        Stmt::Let { name, value } => {
+            if let Expr::List(items) = value {
+                let elem = list_elem_type(items, locals, env, fname);
+                if elem != Ty::Unknown {
+                    out.insert(name.clone(), elem);
+                }
+            }
+        }
+        Stmt::Thread { body, .. } | Stmt::Page { body, .. } => {
+            collect_let_lists(&body.stmts, locals, env, fname, out)
+        }
+        Stmt::If { then, elifs, els, .. } => {
+            collect_let_lists(&then.stmts, locals, env, fname, out);
+            for (_, b) in elifs {
+                collect_let_lists(&b.stmts, locals, env, fname, out);
+            }
+            if let Some(b) = els {
+                collect_let_lists(&b.stmts, locals, env, fname, out);
+            }
+        }
+        _ => {}
     }
 }
 
