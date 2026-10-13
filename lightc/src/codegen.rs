@@ -328,11 +328,22 @@ impl<'a> CodeGen<'a> {
     }
 
     fn i64_to_ptr(&mut self, v: &str) -> String {
-        // 先摘掉运行期标签再转指针：堆指针的高 8 位本来就是 0，
+        // 先摘掉运行期标签再转指针：堆指针的高8 位本来就是 0，
         // 解标签对真实指针是空操作，对带标签的值才是必须的。
         let u = self.untag(v);
         let r = self.fresh();
         self.emit(&format!("  {} = inttoptr i64 {} to ptr", r, u));
+        r
+    }
+
+    /// 已知静态类型时转指针：非动态值不必解标签（堆指针高8 位为 0，
+    /// 掩码是恒等操作），省掉一次运行期调用。
+    fn i64_to_ptr_typed(&mut self, v: &str, ty: &Ty) -> String {
+        if *ty == Ty::Unknown {
+            return self.i64_to_ptr(v);
+        }
+        let r = self.fresh();
+        self.emit(&format!("  {} = inttoptr i64 {} to ptr", r, v));
         r
     }
 
@@ -2143,8 +2154,8 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         if lt == Ty::Str || rt == Ty::Str {
             let lr = if lt == Ty::Unknown { self.untag(&lr) } else { lr };
             let rr = if rt == Ty::Unknown { self.untag(&rr) } else { rr };
-            let lp = self.i64_to_ptr(&lr);
-            let rp = self.i64_to_ptr(&rr);
+            let lp = self.i64_to_ptr_typed(&lr, &lt);
+            let rp = self.i64_to_ptr_typed(&rr, &rt);
             let cp = self.fresh();
             self.emit(&format!("  {} = call ptr @light_str_concat(ptr {}, ptr {})", cp, lp, rp));
             // 只释放自己新建的字符串；类型未知的一侧是容器里的借用值，不能释放
@@ -2393,8 +2404,8 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         if lt == Ty::Str || rt == Ty::Str {
             let lr = if lt == Ty::Unknown { self.untag(&lr) } else { lr };
             let rr = if rt == Ty::Unknown { self.untag(&rr) } else { rr };
-            let lp = self.i64_to_ptr(&lr);
-            let rp = self.i64_to_ptr(&rr);
+            let lp = self.i64_to_ptr_typed(&lr, &lt);
+            let rp = self.i64_to_ptr_typed(&rr, &rt);
             let cmp = self.fresh();
             self.emit(&format!(
                 "  {} = call i64 @light_str_cmp(ptr {}, ptr {})",
