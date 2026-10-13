@@ -589,8 +589,9 @@ fn preload_aliases(file_path: &std::path::Path, quiet: bool) {
         return;
     };
     let base_dir = canonical.parent().unwrap_or(Path::new(".")).to_path_buf();
-    if !quiet {
-        if let Some(decl) = language_declaration(&source, &base_dir) {
+    // 装载别名与 quiet 无关：--quiet 只是不打印提示，别名不装英文模式就失效了
+    if let Some(decl) = language_declaration(&source, &base_dir) {
+        if !quiet {
             eprintln!("源文件声明语言：{}", decl);
         }
     }
