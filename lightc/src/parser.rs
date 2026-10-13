@@ -880,7 +880,7 @@ impl Parser {
 /// 可用的类型标注名称
 pub fn is_type_name(name: &str) -> bool {
     matches!(
-        name,
+        crate::alias::resolve(name).as_str(),
         "整数" | "浮点" | "字符串" | "布尔" | "列表" | "数组" | "元组" | "字典" | "空" | "任意"
     )
 }

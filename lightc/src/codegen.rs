@@ -61,7 +61,7 @@ impl Ty {
 
 /// 类型标注名称 -> 类型（推断环境用的 Ty）
 pub fn type_by_name(name: &str) -> Option<ITy> {
-    Some(match name {
+    Some(match crate::alias::resolve(name).as_str() {
         "整数" => ITy::Int(typeinfer::IntWidth::I64),
         "浮点" => ITy::Float,
         "字符串" => ITy::Str,

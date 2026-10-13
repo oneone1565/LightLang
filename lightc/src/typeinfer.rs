@@ -563,7 +563,7 @@ pub fn expr_type(expr: &Expr, locals: &HashMap<String, Ty>, env: &TypeEnv, fname
         }
         Expr::Call { name, args } => {
             let name = name.rsplit('.').next().unwrap_or(name.as_str());
-            match name {
+            match crate::alias::resolve(name).as_str() {
                 "数组" => return Ty::Array,
                 "范围" => return Ty::Array,
                 "长度" => return Ty::Int(IntWidth::I64),

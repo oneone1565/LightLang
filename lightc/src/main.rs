@@ -496,6 +496,91 @@ fn zig_triple(triple: &str) -> String {
 /// 预扫描源文件里的 `导入 "xxx.llang"`，装载别名。
 /// 必须先于任何词法/语法分析跑完，否则主文件里的别名根本没机会生效。
 /// 扩展名不能省：不写就分不清是 .light 模块、.rs 原生模块还是别名文件。
+/// 源文件头的语言声明。必须写在最前面，形式为：
+///
+///     语言 : 中文          Lang : Zh-cn
+///     语言 : 英文          Lang : Eng
+///     语言 : 来自文件(./One.llang)   Lang : File(./One.llang)
+///
+/// 声明之前只允许空行与 `#` 注释。中文是默认，什么都不写也行。
+fn language_declaration(source: &str, base_dir: &std::path::Path) -> Option<String> {
+    for raw in source.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            return None;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        let spec = match key {
+            "语言" | "Lang" => value,
+            _ => return None,
+        };
+        match load_language_aliases(spec, base_dir)
+        {
+            Ok(desc) => return Some(desc),
+            Err(e) => {
+                eprintln!("语言声明有误：{}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+    None
+}
+
+fn load_language_aliases(spec: &str, base_dir: &std::path::Path) -> Result<String, String> {
+    let spec = spec.trim().trim_matches('"');
+    match spec {
+        "中文" | "zh-cn" | "Zh-cn" | "ZH-CN" => Ok("中文（默认，未装载别名）".to_string()),
+        "英文" | "eng" | "Eng" | "En" | "en" => {
+            let n = alias::load_english();
+            Ok(format!("英文（内建别名 {} 条）", n))
+        }
+        other => {
+            let path = other
+                .strip_prefix("来自文件(")
+                .or_else(|| other.strip_prefix("File("))
+                .and_then(|rest| rest.strip_suffix(')'))
+                .ok_or_else(|| {
+                    format!(
+                        "无法识别的写法 {}，可用：中文 / 英文 / 来自文件(路径) 或 Lang : Zh-cn / Eng / File(路径)",
+                        other
+                    )
+                })?;
+            let full = base_dir.join(path);
+            let text = std::fs::read_to_string(&full)
+                .map_err(|e| format!("读取 {} 失败：{}", full.display(), e))?;
+            let n = alias::load_llang(&text).map_err(|e| format!("别名文件有误：{}", e))?;
+            Ok(format!("来自文件 {}（{} 条）", path, n))
+        }
+    }
+}
+
+/// 去掉源文件头的语言声明行，让词法器看不到它。
+/// 声明之前只允许空行与注释，所以只查最前面那段。
+fn strip_language_declaration(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut done = false;
+    for line in source.lines() {
+        let trimmed = line.trim();
+        let is_decl = !done
+            && (trimmed.starts_with("语言") || trimmed.starts_with("Lang"))
+            && trimmed.contains(':');
+        if is_decl {
+            done = true;
+            continue;
+        }
+        if !done && !trimmed.is_empty() && !trimmed.starts_with('#') {
+            done = true;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 fn preload_aliases(file_path: &std::path::Path, quiet: bool) {
     let Ok(canonical) = std::fs::canonicalize(file_path) else {
         return;
@@ -504,6 +589,11 @@ fn preload_aliases(file_path: &std::path::Path, quiet: bool) {
         return;
     };
     let base_dir = canonical.parent().unwrap_or(Path::new(".")).to_path_buf();
+    if !quiet {
+        if let Some(decl) = language_declaration(&source, &base_dir) {
+            eprintln!("源文件声明语言：{}", decl);
+        }
+    }
     for line in source.lines() {
         let line = line.trim();
         let Some(rest) = line.strip_prefix("导入") else {
@@ -670,7 +760,7 @@ fn resolve_imports(
         return;
     }
 
-    let lexer = lexer::Lexer::new(&src);
+    let lexer = lexer::Lexer::new(&strip_language_declaration(&src));
     let tokens = match lexer.tokenize() {
         Ok(t) => t,
         Err(e) => {

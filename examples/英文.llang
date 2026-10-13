@@ -1,0 +1,110 @@
+# LightLang 英文模式
+#
+#   导入 "英文.llang"
+#
+# 导入后全部关键字、类型名与内建函数都可以用英文写法，与中文原名完全等价。
+# 变量名、注释、字符串内容不受影响。
+
+# ---- 关键字 ----
+let : 让
+print : 打印
+throw : 抛出
+thread : 线程
+page : 页面
+assert : 断言
+try : 尝试
+catch : 捕获
+finally : 最终
+if : 如果
+elif : 否则如果
+else : 否则
+fn : 函数
+return : 返回
+while : 当
+for : 对于
+in : 在
+break : 跳出
+continue : 继续
+true : 真
+false : 假
+none : 空
+array : 数组
+asm : 汇编
+extern : 外部
+import : 导入
+and : 且
+or : 或
+not : 非
+
+# ---- 类型名 ----
+int : 整数
+float : 浮点
+string : 字符串
+bool : 布尔
+list : 列表
+tuple : 元组
+dict : 字典
+
+# ---- 内建函数：通用 ----
+len : 长度
+contains : 包含
+find : 查找
+index_of : 索引
+sum : 求和
+min : 最小
+max : 最大
+abs : 绝对值
+range : 范围
+sort : 排序
+reverse : 反转
+input : 输入
+exit : 退出
+
+# ---- 内建函数：类型转换 ----
+int_of : 整数
+float_of : 浮点
+str_of : 字符串
+char_at : 字符
+
+# ---- 内建函数：字符串 ----
+upper : 大写
+lower : 小写
+trim : 去空白
+slice : 切片
+split : 分割
+join : 合并
+replace : 替换
+concat_str : 连接
+
+# ---- 内建函数：容器 ----
+append : 追加
+pop : 弹出
+push : 追加
+exists_key : 存在
+
+# ---- 内建函数：文件与系统 ----
+read_file : 读取文件
+write_file : 写入文件
+append_file : 追加文件
+file_exists : 文件存在
+getenv : 环境变量
+exec : 执行
+argv : 命令行参数
+
+# ---- 内建函数：数学 ----
+sin : 正弦
+cos : 余弦
+tan : 正切
+sqrt : 平方根
+log : 对数
+log10 : 对数10
+pow : 幂
+floor : 向下取整
+ceil : 向上取整
+random : 随机
+random_int : 随机整数
+pi : 圆周率
+e : 自然常数
+
+# ---- 内建函数：诊断 ----
+eprint : 错误输出
