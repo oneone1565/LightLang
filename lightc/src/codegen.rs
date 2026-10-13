@@ -2530,6 +2530,8 @@ fn cleanup_scope(&mut self, scope: &Scope) {
         if !matches!(ty, Ty::Int(..)) {
             return Err("启动端口必须是整数".into());
         }
+        // 字面量可能选到 i32 宽度，运行期接口一律收 i64
+        let port = self.value_as_i64(&port, &ty);
         let result = self.fresh();
         self.emit(&format!("  {} = call i64 @light_web_run_v1(i64 {})", result, port));
         Ok((result, Ty::Int(I64W)))
@@ -2552,10 +2554,10 @@ fn cleanup_scope(&mut self, scope: &Scope) {
             "表格" => 11,
             "分隔线" => 12,
             "卡片" => 13,
-            "徽章" => 14,
+            "标签" | "徽章" => 14,
             "进度条" => 15,
             "代码块" => 16,
-            "提示框" => 17,
+            "提示" | "提示框" => 17,
             "容器" => 18,
             _ => return None,
         })
@@ -3882,10 +3884,10 @@ fn element_kind_id(name: &str) -> Result<i32, String> {
         "表格" => 11,
         "分隔线" => 12,
         "卡片" => 13,
-        "标签" => 14,
+        "标签" | "徽章" => 14,
         "进度条" => 15,
         "代码块" => 16,
-        "提示" => 17,
+        "提示" | "提示框" => 17,
         "容器" => 18,
         other => return Err(format!("未知的页面元素：{}", other)),
     };
